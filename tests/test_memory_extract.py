@@ -240,14 +240,14 @@ def test_tool_agnostic_rust_ts_and_empty_code_messages_produce_facts():
     facts = extract_compile_traps(attempts=attempts)
     assert len(facts) == 3
     codes = {f.signature[0] for f in facts}
-    assert codes == {"E0425", "TS2304", "tier0_failure"}
+    assert codes == {"E0425", "TS2304", ""}
 
     # Statements generated according to template
     rust_fact = next(f for f in facts if f.signature[0] == "E0425")
     assert "Attempt failed Tier 0 with E0425 in src/main.rs:" in rust_fact.statement
 
-    unparsed_fact = next(f for f in facts if f.signature[0] == "tier0_failure")
-    assert "Attempt failed Tier 0 with tier0_failure:" in unparsed_fact.statement
+    unparsed_fact = next(f for f in facts if f.signature[0] == "")
+    assert "Attempt failed Tier 0:" in unparsed_fact.statement
     assert "Build failed" in unparsed_fact.statement
 
 
@@ -484,4 +484,159 @@ def test_fix_hint_retained_from_most_recent_occurrence_with_fix():
     assert fact.fix_hint == "+fix attempt 1"  # Retained from most recent occurrence with fix
     assert fact.provenance.fix_attempt_no == 2
     assert fact.provenance.fix_commit == "sha-fix-1"
+
+
+def test_feedback_sent_derives_fact_for_build_or_compile():
+    """When attempt has mechanical_failure on build/compile without compile_errors_json, derive from feedback_sent."""
+    from jev.memory_extract import extract_compile_traps
+
+    # Real-shaped row: failed_check "build", feedback_sent "SyntaxError in app.py: expected ':' (line 1)", files_json ["src/app.py"], later passing attempt
+    # -> one fact with code "SyntaxError", file "src/app.py", message "expected ':'", and a fix_hint.
+    att1 = {
+        "run_id": "r-fb",
+        "subgoal_id": "sg-fb",
+        "attempt_no": 1,
+        "tier": "mechanical",
+        "outcome": "mechanical_failure",
+        "failed_check": "build",
+        "feedback_sent": "SyntaxError in app.py: expected ':' (line 1)",
+        "files_json": json.dumps(["src/app.py"]),
+    }
+    att2 = {
+        "run_id": "r-fb",
+        "subgoal_id": "sg-fb",
+        "attempt_no": 2,
+        "tier": "semantic",
+        "outcome": "passed",
+        "diff": "+good diff",
+    }
+    facts = extract_compile_traps(attempts=[att1, att2])
+    assert len(facts) == 1
+    fact = facts[0]
+    assert fact.signature[0] == "SyntaxError"
+    assert fact.signature[1] == "src/app.py"
+    assert fact.signature[2] == "expected ':'"
+    assert fact.fix_hint == "+good diff"
+
+
+def test_other_failed_checks_with_feedback_sent_produce_no_fact():
+    """Attempts with other failed_check values produce NO fact."""
+    from jev.memory_extract import extract_compile_traps
+
+    other_checks = [
+        "scope",
+        "suppression",
+        "unresolved_import",
+        "tests",
+        "env_not_ready",
+        "no_compile_command",
+        "no_tests_collected",
+    ]
+    attempts = [
+        {
+            "run_id": f"r-{fc}",
+            "subgoal_id": "sg-1",
+            "attempt_no": 1,
+            "tier": "mechanical",
+            "outcome": "mechanical_failure",
+            "failed_check": fc,
+            "feedback_sent": f"Some error in app.py: failure {fc}",
+            "files_json": json.dumps(["src/app.py"]),
+        }
+        for fc in other_checks
+    ]
+    facts = extract_compile_traps(attempts=attempts)
+    assert len(facts) == 0
+
+
+def test_quote_temp_paths_replaces_with_tmp_and_is_idempotent():
+    """_quote_temp_paths replaces temp-path-looking substrings with <TMP> without inserting quote characters and is idempotent."""
+    from jev.memory_extract import _quote_temp_paths
+
+    s = 'File "/tmp/pytest-of-u/pytest-3/repo/src/app.py", line 3'
+    res = _quote_temp_paths(s)
+    # app.py kept intact without stray quotes
+    assert "app.py" in res
+    assert '""' not in res
+    assert "<TMP>" in res
+    # Idempotent
+    assert _quote_temp_paths(res) == res
+
+
+def test_windows_paths_in_messages_and_unmatched_absolute_path_basename():
+    """Windows backslashes converted to / and messages with Windows vs Unix temp paths normalize to the SAME string."""
+    from jev.memory_extract import normalize_error
+
+    msg_win = r'File "C:\Users\D\AppData\Local\Temp\x\src\app.py"'
+    msg_unix = 'File "/tmp/pytest-of-u/pytest-3/repo/src/app.py"'
+
+    # Both normalize to the same string when known_files has src/app.py
+    _, _, norm_win = normalize_error("E1", "src/app.py", msg_win, known_files=["src/app.py"])
+    _, _, norm_unix = normalize_error("E1", "src/app.py", msg_unix, known_files=["src/app.py"])
+    assert norm_win == norm_unix
+
+    # Unmatched absolute path token in message reduces to its basename
+    msg_unmatched = r'Error at D:\some\unknown\path\helper.py'
+    _, _, norm_unmatched = normalize_error("E1", "src/app.py", msg_unmatched, known_files=["src/app.py"])
+    assert "D:" not in norm_unmatched
+    assert "helper.py" in norm_unmatched
+
+
+def test_strip_bracketed_line_column_forms():
+    """Strip bracketed line/column forms [12,8], :[12,8], (12,8), :12:8, :12."""
+    from jev.memory_extract import normalize_error
+
+    maven_unix = "[ERROR] /home/a/proj/src/main/java/Foo.java:[12,8] cannot find symbol"
+    maven_win = r"[ERROR] D:\w\proj\src\main\java\Foo.java:[40,2] cannot find symbol"
+
+    _, _, norm_unix = normalize_error("E", "Foo.java", maven_unix)
+    _, _, norm_win = normalize_error("E", "Foo.java", maven_win)
+    assert norm_unix == norm_win
+    assert "[12,8]" not in norm_unix
+    assert "[40,2]" not in norm_win
+
+
+def test_unknown_absolute_file_path_reduces_to_basename():
+    """When known_files has no match and file path is absolute, reduce it to its basename."""
+    from jev.memory_extract import normalize_error
+
+    win_path = r"C:\workspace\clients\acme\app\page.rs"
+    unix_path = "/ci/acme/app/page.rs"
+
+    _, file_win, _ = normalize_error("E", win_path, "error")
+    _, file_unix, _ = normalize_error("E", unix_path, "error")
+
+    assert file_win == "page.rs"
+    assert file_unix == "page.rs"
+    assert file_win == file_unix
+
+
+def test_empty_code_remains_empty_string_and_statement_formatting():
+    """An empty or missing code must stay the empty string and statement omits with <code> and omits in <file> if empty."""
+    from jev.memory_extract import extract_compile_traps
+
+    attempts = [
+        {
+            "run_id": "r-empty-code",
+            "subgoal_id": "sg-1",
+            "attempt_no": 1,
+            "tier": "mechanical",
+            "outcome": "mechanical_failure",
+            "failed_check": "compile",
+            "compile_errors_json": json.dumps([
+                {"file": "src/app.py", "code": "", "message": "unparsed error in file"},
+                {"file": "", "code": "", "message": "unparsed error no file"},
+            ]),
+        }
+    ]
+    facts = extract_compile_traps(attempts=attempts)
+    assert len(facts) == 2
+    f_with_file = next(f for f in facts if f.signature[1] == "src/app.py")
+    assert f_with_file.signature[0] == ""
+    assert f_with_file.statement == "Attempt failed Tier 0 in src/app.py: unparsed error in file"
+
+    f_no_file = next(f for f in facts if f.signature[1] == "")
+    assert f_no_file.signature[0] == ""
+    assert f_no_file.statement == "Attempt failed Tier 0: unparsed error no file"
+
 

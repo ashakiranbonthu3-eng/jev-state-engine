@@ -54,11 +54,17 @@ def _cut_diff(diff: Optional[str], max_lines: int = 40, max_chars: int = 3000) -
 
 
 def _quote_temp_paths(text: str) -> str:
-    """Quotes unquoted path-like tokens that appear to be temporary directories."""
+    """Replaces temp-path-looking substrings with <TMP> idempotently without inserting quotes."""
     temp_pattern = re.compile(
-        r'(?<!["\'])(?:(?:[A-Za-z]:)?[\\/][^\s\'"]*?(?:tmp|temp|pytest-[a-zA-Z0-9_.-]+)[\\/][^\s\'"]+)(?!["\'])'
+        r'(?:[A-Za-z]:)?[/\\](?:[^/\\\s\'",]+[/\\])*(?:tmp|temp|AppData[/\\]Local[/\\]Temp|pytest-[^/\\\s\'",]+)(?:[/\\]pytest-[^/\\\s\'",]+)*(?:[/\\](?:[a-f0-9]{8,}|[0-9]+|[a-zA-Z0-9]{1,2}))?'
     )
-    return temp_pattern.sub(lambda m: f'"{m.group(0)}"', text)
+    return temp_pattern.sub("<TMP>", text)
+
+
+def _convert_windows_paths(text: str) -> str:
+    """Convert backslashes to / inside path-looking tokens."""
+    pattern = re.compile(r'(?:[A-Za-z]:[\\/][^\s\'",()\[\]]*|[^\s\'",()\[\]]*\\[^\s\'",()\[\]]*)')
+    return pattern.sub(lambda m: m.group(0).replace("\\", "/"), text)
 
 
 def normalize_error(
@@ -68,57 +74,67 @@ def normalize_error(
     known_files: Optional[Sequence[str]] = None,
 ) -> Tuple[str, str, str]:
     """Normalize code, file, and error message into a canonical signature."""
-    norm_code = (code or "").strip() or "tier0_failure"
+    # Point 6: An empty or missing code must stay the empty string
+    norm_code = (code or "").strip()
 
     raw_file = (file or "").strip().replace("\\", "/")
-    # Strip line and column numbers from the file if present (e.g. foo.py:12:34)
+    # Strip line and column numbers from the file if present (e.g. foo.py:12:34 or Foo.java:[12,8])
+    raw_file = re.sub(r':?\[\s*\d+\s*(?:,\s*\d+\s*)?\]$', '', raw_file)
+    raw_file = re.sub(r':?\(\s*\d+\s*(?:,\s*\d+\s*)?\)$', '', raw_file)
     raw_file = re.sub(r':\d+(?::\d+)?$', '', raw_file)
 
     norm_file = raw_file
+    matched_known = False
     if known_files and norm_file:
         for kf in sorted(known_files, key=len, reverse=True):
             kf_posix = kf.replace("\\", "/")
-            if norm_file.endswith(kf_posix):
+            if norm_file == kf_posix or norm_file.endswith("/" + kf_posix) or kf_posix.endswith("/" + norm_file):
                 norm_file = kf_posix
+                matched_known = True
                 break
-    elif norm_file:
-        # Strip absolute prefix if present
-        m = re.search(r'/(?:repo|workspace|project|src|lib|tests|packages|apps)/(.+)$', norm_file)
-        if m:
-            matched_segment = norm_file[m.start() + 1 :]
-            norm_file = matched_segment
-        else:
-            # Strip drive letter or leading root
-            norm_file = re.sub(r'^(?:[A-Za-z]:)?[\\/]+', '', norm_file)
-            # If path still contains temp directory prefixes, strip up to temp path
-            norm_file = re.sub(r'^.*?/(?:tmp|temp|pytest-[^/]+)/', '', norm_file)
+
+    # Point 5: When known_files has no match and the file path is absolute, reduce to basename
+    if not matched_known and norm_file:
+        if norm_file.startswith("/") or re.match(r'^[A-Za-z]:/', norm_file):
+            norm_file = norm_file.rsplit("/", 1)[-1]
 
     norm_file = norm_file.strip()
 
     raw_msg = (message or "").strip()
 
-    # 1. Strip absolute path prefixes in message to match repo-relative form
-    if known_files:
-        for kf in sorted(known_files, key=len, reverse=True):
-            kf_posix = kf.replace("\\", "/")
-            pattern = re.compile(r'(?:[A-Za-z]:)?[^\s\'"]*?/' + re.escape(kf_posix))
-            raw_msg = pattern.sub(kf_posix, raw_msg)
-    if norm_file:
-        pattern = re.compile(r'(?:[A-Za-z]:)?[^\s\'"]*?/' + re.escape(norm_file))
-        raw_msg = pattern.sub(norm_file, raw_msg)
+    # Point 3: Windows paths in messages - convert backslashes to / inside path-looking tokens BEFORE stripping
+    raw_msg = _convert_windows_paths(raw_msg)
 
-    # 2. Strip line and column numbers
-    # Remove :line:col or :line after words/filenames
+    # Point 4: Strip bracketed line/column forms: [12,8], :[12,8], (12,8), :12:8, :12, (line 1)
+    raw_msg = re.sub(r':?\[\s*\d+\s*(?:,\s*\d+\s*)?\]', '', raw_msg)
+    raw_msg = re.sub(r':?\(\s*\d+\s*(?:,\s*\d+\s*)?\)', '', raw_msg)
+    raw_msg = re.sub(r'\(\s*line\s+\d+(?:,\s*(?:col|column)\s*\d+)?\s*\)', '', raw_msg, flags=re.IGNORECASE)
     raw_msg = re.sub(r'(?<=[A-Za-z0-9_./-])(?::\d+){1,2}\b:?', '', raw_msg)
-    # Remove "line 12, col 34" or "line 12"
     raw_msg = re.sub(r'\bline\s+\d+(?:,\s*(?:col|column)\s*\d+)?\b', '', raw_msg, flags=re.IGNORECASE)
     raw_msg = re.sub(r'\b(?:col|column)\s+\d+\b', '', raw_msg, flags=re.IGNORECASE)
-    raw_msg = re.sub(r'\(\s*\d+\s*,\s*\d+\s*\)', '', raw_msg)
 
-    # 3. Quotes content that looks like a temp path
+    # Strip absolute prefixes of known files
+    all_known = list(known_files or [])
+    if norm_file and norm_file not in all_known:
+        all_known.append(norm_file)
+
+    for kf in sorted(all_known, key=len, reverse=True):
+        kf_posix = kf.replace("\\", "/")
+        pattern = re.compile(r'(?:[A-Za-z]:/|/)[^\s\'",()\[\]]*?/' + re.escape(kf_posix) + r'\b')
+        raw_msg = pattern.sub(kf_posix, raw_msg)
+
+    # Point 3: Any absolute path token in a message not matched to a known file is reduced to its basename
+    def _reduce_unmatched(m: re.Match) -> str:
+        token = m.group(0)
+        base = token.rsplit("/", 1)[-1]
+        return base if base else token
+
+    raw_msg = re.sub(r'(?:[A-Za-z]:/|/)[^\s\'",()\[\]]+', _reduce_unmatched, raw_msg)
+
+    # Point 2: Replace temp-path-looking substrings with <TMP>
     raw_msg = _quote_temp_paths(raw_msg)
 
-    # 4. Collapse whitespace
+    # Collapse whitespace
     norm_msg = re.sub(r'\s+', ' ', raw_msg).strip()
 
     return norm_code, norm_file, norm_msg
@@ -126,10 +142,48 @@ def normalize_error(
 
 def _build_statement(code: str, file: str, normalized_message: str) -> str:
     """Construct statement from standard template without LLM text."""
-    effective_code = code or "tier0_failure"
-    if file:
-        return f"Attempt failed Tier 0 with {effective_code} in {file}: {normalized_message}"
-    return f"Attempt failed Tier 0 with {effective_code}: {normalized_message}"
+    # Point 6: An empty code reads "Attempt failed Tier 0 in <file>: <message>" (omits "in <file>" when file is empty)
+    if code and file:
+        return f"Attempt failed Tier 0 with {code} in {file}: {normalized_message}"
+    if code and not file:
+        return f"Attempt failed Tier 0 with {code}: {normalized_message}"
+    if file and not code:
+        return f"Attempt failed Tier 0 in {file}: {normalized_message}"
+    return f"Attempt failed Tier 0: {normalized_message}"
+
+
+def _derive_error_from_feedback(
+    feedback: str, known_files: Optional[Sequence[str]] = None
+) -> Dict[str, str]:
+    """Derive ONE error from mechanical engine feedback_sent."""
+    fb = feedback.strip()
+    if not fb:
+        return {}
+
+    pattern = re.compile(
+        r'^(?:(?P<code>[A-Za-z0-9_]*(?:Error|Exception))\b\s*)?'
+        r'(?:in\s+(?P<file>[^\s:]+):\s*|:\s*)?'
+        r'(?P<rest>.*)$',
+        re.DOTALL,
+    )
+    m = pattern.match(fb)
+    if m:
+        code = m.group("code") or ""
+        raw_file = m.group("file") or ""
+        rest = m.group("rest") or ""
+
+        resolved_file = raw_file
+        if raw_file and known_files:
+            rf_posix = raw_file.replace("\\", "/")
+            for kf in known_files:
+                kf_posix = kf.replace("\\", "/")
+                if kf_posix == rf_posix or kf_posix.endswith("/" + rf_posix):
+                    resolved_file = kf_posix
+                    break
+
+        return {"code": code, "file": resolved_file, "message": rest}
+
+    return {"code": "", "file": "", "message": fb}
 
 
 def _extract_file_content_from_attempt(
@@ -237,7 +291,6 @@ def extract_compile_traps(
     grouped_occurrences: Dict[Tuple[Optional[str], Tuple[str, str, str]], List[Dict[str, Any]]] = {}
 
     for att in actual_attempts:
-        # Check if attempt failed Tier 0 with compile errors
         tier = att.get("tier")
         outcome = att.get("outcome")
         failed_check = att.get("failed_check")
@@ -246,22 +299,8 @@ def extract_compile_traps(
         if tier == "semantic" or outcome in ("passed", "semantic_failure"):
             continue
 
-        raw_errors_json = att.get("compile_errors_json")
-        if not raw_errors_json:
+        if outcome != "mechanical_failure":
             continue
-
-        try:
-            compile_errors = json.loads(raw_errors_json) if isinstance(raw_errors_json, str) else raw_errors_json
-        except Exception:
-            compile_errors = []
-
-        if not isinstance(compile_errors, list) or not compile_errors:
-            continue
-
-        rid = str(att.get("run_id") or "")
-        sid = str(att.get("subgoal_id") or "")
-        att_no = int(att.get("attempt_no") or 1)
-        r_key = att.get("repo_key") or run_repo_map.get(rid) or repo_key
 
         # Extract known files from attempt
         known_files: List[str] = []
@@ -275,6 +314,32 @@ def extract_compile_traps(
                     known_files.extend(str(f) for f in parsed_files.keys())
             except Exception:
                 pass
+
+        raw_errors_json = att.get("compile_errors_json")
+        compile_errors = []
+        if raw_errors_json:
+            try:
+                parsed_errors = json.loads(raw_errors_json) if isinstance(raw_errors_json, str) else raw_errors_json
+                if isinstance(parsed_errors, list):
+                    compile_errors = parsed_errors
+            except Exception:
+                compile_errors = []
+
+        # Point 1: When no compile_errors_json and failed_check in {"build", "compile"} and feedback_sent
+        if not compile_errors:
+            if failed_check in {"build", "compile"}:
+                feedback = att.get("feedback_sent")
+                if feedback and isinstance(feedback, str) and feedback.strip():
+                    derived = _derive_error_from_feedback(feedback.strip(), known_files=known_files)
+                    if derived:
+                        compile_errors = [derived]
+            if not compile_errors:
+                continue
+
+        rid = str(att.get("run_id") or "")
+        sid = str(att.get("subgoal_id") or "")
+        att_no = int(att.get("attempt_no") or 1)
+        r_key = att.get("repo_key") or run_repo_map.get(rid) or repo_key
 
         # Find first later attempt of the same subgoal that passed Tier 0
         sg_attempts = attempts_by_sg.get((rid, sid), [])
@@ -361,7 +426,7 @@ def extract_compile_traps(
         final_fix_att_no = most_recent_fix.get("fix_attempt_no") if most_recent_fix else None
         final_fix_commit = most_recent_fix.get("fix_commit") if most_recent_fix else None
 
-        # Build evidence hashes from most recent with hashes or latest
+        # Build evidence hashes from occurrences
         merged_hashes: Dict[str, str] = {}
         for o in occurrences:
             merged_hashes.update(o.get("evidence_hashes") or {})
