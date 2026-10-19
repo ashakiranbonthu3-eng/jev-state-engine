@@ -1,10 +1,10 @@
-"""Phase 4a: Pure, read-only memory extractor for CompileTrap facts.
+"""Phase 4a & 4b-1: Pure, read-only memory extractor for CompileTrap facts.
 
 Extracts deterministic, deduplicated compile error facts from ledger tables.
-Contains no LLM imports, no network access, and makes no writes to any database.
+Contains no LLM imports, no network access, no hashing, and makes no writes to any database.
 """
 
-import hashlib
+from collections import Counter
 import json
 import re
 import sqlite3
@@ -39,18 +39,114 @@ class CompileTrap(BaseModel):
     fix_hint: Optional[str] = None
     count: int = 1
     provenance: CompileTrapProvenance
-    evidence_hashes: Dict[str, str] = Field(default_factory=dict)
+    evidence_paths: List[str] = Field(default_factory=list)
 
 
-def _cut_diff(diff: Optional[str], max_lines: int = 40, max_chars: int = 3000) -> Optional[str]:
-    """Excerpt diff up to max_lines and max_chars."""
-    if not diff or not isinstance(diff, str):
+def _parse_diff_files(diff_text: Optional[str], default_file: Optional[str] = None) -> Dict[str, List[str]]:
+    """Parse body lines (+/- excluding headers) grouped by file using diff --git headers."""
+    if not diff_text or not isinstance(diff_text, str):
+        return {}
+
+    lines = diff_text.splitlines()
+    files: Dict[str, List[str]] = {}
+    current_file = None
+
+    has_git_header = any(line.startswith("diff --git ") for line in lines)
+
+    if not has_git_header:
+        file_key = default_file or ""
+        body_lines = []
+        for line in lines:
+            if line.startswith("+++") or line.startswith("---"):
+                continue
+            if line.startswith("+") or line.startswith("-"):
+                body_lines.append(line)
+        if body_lines:
+            files[file_key] = body_lines
+        return files
+
+    for line in lines:
+        if line.startswith("diff --git "):
+            m = re.search(r'diff --git (?:a/)?(\S+) (?:b/)?(\S+)', line)
+            if m:
+                current_file = m.group(2)
+                if current_file.startswith("b/"):
+                    current_file = current_file[2:]
+            else:
+                current_file = line[len("diff --git "):].strip()
+            if current_file not in files:
+                files[current_file] = []
+        elif current_file is not None:
+            if line.startswith("+++") or line.startswith("---"):
+                continue
+            if line.startswith("+") or line.startswith("-"):
+                files[current_file].append(line)
+
+    return files
+
+
+def compute_diff_delta(
+    failing_diff: Optional[str],
+    passing_diff: Optional[str],
+    default_file: Optional[str] = None,
+    max_lines: int = 40,
+    max_chars: int = 3000,
+) -> Optional[str]:
+    """Compute the delta between failing attempt diff and passing attempt diff."""
+    if not passing_diff:
         return None
-    lines = diff.splitlines(keepends=True)
-    excerpt = "".join(lines[:max_lines])
-    if len(excerpt) > max_chars:
-        excerpt = excerpt[:max_chars]
-    return excerpt or None
+
+    fail_files = _parse_diff_files(failing_diff, default_file=default_file)
+    pass_files = _parse_diff_files(passing_diff, default_file=default_file)
+
+    all_files = sorted(set(fail_files.keys()) | set(pass_files.keys()))
+    delta_blocks = []
+
+    for f in all_files:
+        f_fail_lines = fail_files.get(f, [])
+        f_pass_lines = pass_files.get(f, [])
+
+        pass_counts = Counter(f_pass_lines)
+        removed = []
+        for line in f_fail_lines:
+            if pass_counts[line] > 0:
+                pass_counts[line] -= 1
+            else:
+                removed.append(line)
+
+        fail_counts = Counter(f_fail_lines)
+        added = []
+        for line in f_pass_lines:
+            if fail_counts[line] > 0:
+                fail_counts[line] -= 1
+            else:
+                added.append(line)
+
+        if not removed and not added:
+            continue
+
+        file_header = f"file: {f}" if f else "file: unknown"
+        file_lines = [file_header]
+        for r in removed:
+            file_lines.append(f"- {r[1:]}")
+        for a in added:
+            file_lines.append(f"+ {a[1:]}")
+
+        delta_blocks.append("\n".join(file_lines))
+
+    if not delta_blocks:
+        return None
+
+    full_render = "\n".join(delta_blocks)
+    lines = full_render.splitlines()
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        full_render = "\n".join(lines)
+
+    if len(full_render) > max_chars:
+        full_render = full_render[:max_chars]
+
+    return full_render or None
 
 
 def _quote_temp_paths(text: str) -> str:
@@ -74,7 +170,6 @@ def normalize_error(
     known_files: Optional[Sequence[str]] = None,
 ) -> Tuple[str, str, str]:
     """Normalize code, file, and error message into a canonical signature."""
-    # Point 6: An empty or missing code must stay the empty string
     norm_code = (code or "").strip()
 
     raw_file = (file or "").strip().replace("\\", "/")
@@ -93,7 +188,6 @@ def normalize_error(
                 matched_known = True
                 break
 
-    # Point 5: When known_files has no match and the file path is absolute, reduce to basename
     if not matched_known and norm_file:
         if norm_file.startswith("/") or re.match(r'^[A-Za-z]:/', norm_file):
             norm_file = norm_file.rsplit("/", 1)[-1]
@@ -102,10 +196,9 @@ def normalize_error(
 
     raw_msg = (message or "").strip()
 
-    # Point 3: Windows paths in messages - convert backslashes to / inside path-looking tokens BEFORE stripping
     raw_msg = _convert_windows_paths(raw_msg)
 
-    # Point 4: Strip bracketed line/column forms: [12,8], :[12,8], (12,8), :12:8, :12, (line 1)
+    # Strip bracketed line/column forms: [12,8], :[12,8], (12,8), :12:8, :12, (line 1)
     raw_msg = re.sub(r':?\[\s*\d+\s*(?:,\s*\d+\s*)?\]', '', raw_msg)
     raw_msg = re.sub(r':?\(\s*\d+\s*(?:,\s*\d+\s*)?\)', '', raw_msg)
     raw_msg = re.sub(r'\(\s*line\s+\d+(?:,\s*(?:col|column)\s*\d+)?\s*\)', '', raw_msg, flags=re.IGNORECASE)
@@ -123,7 +216,6 @@ def normalize_error(
         pattern = re.compile(r'(?:[A-Za-z]:/|/)[^\s\'",()\[\]]*?/' + re.escape(kf_posix) + r'\b')
         raw_msg = pattern.sub(kf_posix, raw_msg)
 
-    # Point 3: Any absolute path token in a message not matched to a known file is reduced to its basename
     def _reduce_unmatched(m: re.Match) -> str:
         token = m.group(0)
         base = token.rsplit("/", 1)[-1]
@@ -131,10 +223,8 @@ def normalize_error(
 
     raw_msg = re.sub(r'(?:[A-Za-z]:/|/)[^\s\'",()\[\]]+', _reduce_unmatched, raw_msg)
 
-    # Point 2: Replace temp-path-looking substrings with <TMP>
     raw_msg = _quote_temp_paths(raw_msg)
 
-    # Collapse whitespace
     norm_msg = re.sub(r'\s+', ' ', raw_msg).strip()
 
     return norm_code, norm_file, norm_msg
@@ -142,7 +232,6 @@ def normalize_error(
 
 def _build_statement(code: str, file: str, normalized_message: str) -> str:
     """Construct statement from standard template without LLM text."""
-    # Point 6: An empty code reads "Attempt failed Tier 0 in <file>: <message>" (omits "in <file>" when file is empty)
     if code and file:
         return f"Attempt failed Tier 0 with {code} in {file}: {normalized_message}"
     if code and not file:
@@ -184,47 +273,6 @@ def _derive_error_from_feedback(
         return {"code": code, "file": resolved_file, "message": rest}
 
     return {"code": "", "file": "", "message": fb}
-
-
-def _extract_file_content_from_attempt(
-    file_path: str, files_json_raw: Any, diff_raw: Any
-) -> Optional[str]:
-    """Extract content of the specified file from attempt metadata if present."""
-    if not file_path:
-        return None
-
-    norm_target = file_path.replace("\\", "/")
-
-    # Check files_json if it is a dictionary of content
-    if files_json_raw:
-        try:
-            parsed = json.loads(files_json_raw) if isinstance(files_json_raw, str) else files_json_raw
-            if isinstance(parsed, dict) and norm_target in parsed:
-                val = parsed[norm_target]
-                if isinstance(val, str):
-                    return val
-        except Exception:
-            pass
-
-    # Check diff for new file additions
-    if diff_raw and isinstance(diff_raw, str):
-        target_name = Path(norm_target).name
-        if target_name in diff_raw or norm_target in diff_raw:
-            sections = re.split(r'\ndiff --git ', "\n" + diff_raw)
-            for sec in sections:
-                if not sec.strip():
-                    continue
-                header_line = sec.splitlines()[0] if sec.splitlines() else ""
-                if norm_target in header_line or target_name in header_line:
-                    # Collect additions
-                    additions = []
-                    for line in sec.splitlines():
-                        if line.startswith("+") and not line.startswith("+++"):
-                            additions.append(line[1:])
-                    if additions:
-                        return "\n".join(additions)
-
-    return None
 
 
 def extract_compile_traps(
@@ -354,7 +402,6 @@ def extract_compile_traps(
                     fix_attempt = cand
                     break
 
-        fix_hint = _cut_diff(fix_attempt.get("diff")) if fix_attempt else None
         fix_attempt_no = int(fix_attempt.get("attempt_no")) if fix_attempt and fix_attempt.get("attempt_no") is not None else None
         fix_commit = subgoal_commit_map.get((rid, sid)) if fix_attempt else None
         base_commit = run_map.get(rid, {}).get("base_commit")
@@ -378,12 +425,15 @@ def extract_compile_traps(
 
             sig = (norm_code, norm_file, norm_msg)
 
-            # Calculate evidence_hashes
-            ev_hashes: Dict[str, str] = {}
-            if norm_file:
-                content = _extract_file_content_from_attempt(norm_file, att.get("files_json"), att.get("diff"))
-                if content is not None:
-                    ev_hashes[norm_file] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            # Point 1: fix_hint is the delta between failing attempt's diff and passing attempt's diff
+            fix_hint = compute_diff_delta(
+                att.get("diff"),
+                fix_attempt.get("diff") if fix_attempt else None,
+                default_file=norm_file,
+            ) if fix_attempt else None
+
+            # Point 2: evidence_paths is a sorted list of repo-relative file paths concerned by error
+            ev_paths = [norm_file] if norm_file else []
 
             occ = {
                 "repo_key": r_key,
@@ -396,7 +446,7 @@ def extract_compile_traps(
                 "fix_attempt_no": fix_attempt_no,
                 "base_commit": base_commit,
                 "fix_commit": fix_commit,
-                "evidence_hashes": ev_hashes,
+                "evidence_paths": ev_paths,
             }
             grouped_occurrences.setdefault((r_key, sig), []).append(occ)
 
@@ -426,10 +476,8 @@ def extract_compile_traps(
         final_fix_att_no = most_recent_fix.get("fix_attempt_no") if most_recent_fix else None
         final_fix_commit = most_recent_fix.get("fix_commit") if most_recent_fix else None
 
-        # Build evidence hashes from occurrences
-        merged_hashes: Dict[str, str] = {}
-        for o in occurrences:
-            merged_hashes.update(o.get("evidence_hashes") or {})
+        # Point 2: merged evidence_paths is the sorted union of paths across occurrences
+        merged_paths = sorted({p for o in occurrences for p in o.get("evidence_paths", []) if p})
 
         provenance = CompileTrapProvenance(
             run_id=most_recent["run_id"],
@@ -450,7 +498,7 @@ def extract_compile_traps(
             fix_hint=final_fix_hint,
             count=count,
             provenance=provenance,
-            evidence_hashes=merged_hashes,
+            evidence_paths=merged_paths,
         )
         facts.append(trap)
 
@@ -479,6 +527,15 @@ def extract_from_ledger(
     if not db_file.exists():
         return []
 
+    # Point 3: extract_from_ledger uses repo_key if given, otherwise the name of the ledger's parent folder
+    # when the path looks like .../repos/<name>/ledger.db, otherwise None.
+    resolved_repo_key = repo_key
+    if not resolved_repo_key:
+        posix_path = db_file.as_posix()
+        m = re.search(r'(?:^|/)repos/([^/]+)/ledger\.db$', posix_path, re.IGNORECASE)
+        if m:
+            resolved_repo_key = m.group(1)
+
     # Open SQLite in read-only URI mode
     uri_path = db_file.resolve().as_posix()
     ro_uri = f"file:{uri_path}?mode=ro"
@@ -488,7 +545,6 @@ def extract_from_ledger(
     try:
         cur = conn.cursor()
 
-        # Check existing tables
         tables = {
             r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
@@ -496,11 +552,6 @@ def extract_from_ledger(
         runs = [dict(r) for r in cur.execute("SELECT * FROM runs").fetchall()] if "runs" in tables else []
         subgoals = [dict(r) for r in cur.execute("SELECT * FROM subgoals").fetchall()] if "subgoals" in tables else []
         attempts = [dict(r) for r in cur.execute("SELECT * FROM attempts").fetchall()] if "attempts" in tables else []
-
-        # If repo_key not explicitly given, try parent dir name if structured as repos/<repo_key>/ledger.db
-        resolved_repo_key = repo_key
-        if not resolved_repo_key and db_file.parent.name and db_file.parent.parent.name == "repos":
-            resolved_repo_key = db_file.parent.name
 
         return extract_compile_traps(
             attempts=attempts,

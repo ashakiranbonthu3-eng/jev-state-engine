@@ -9,7 +9,7 @@ from jev.ledger import SqliteLedger
 
 
 def test_no_llm_or_network_imports_in_memory_extract():
-    """Assert module source does not import langchain or httpx."""
+    """Assert module source does not import langchain, httpx, or hashlib."""
     import jev.memory_extract as mod
 
     source_path = Path(mod.__file__)
@@ -17,6 +17,7 @@ def test_no_llm_or_network_imports_in_memory_extract():
     assert "langchain" not in source_text, "memory_extract must not import langchain"
     assert "httpx" not in source_text, "memory_extract must not import httpx"
     assert "urllib" not in source_text, "memory_extract must not import network libraries"
+    assert "hashlib" not in source_text, "memory_extract must not import hashlib"
 
 
 def test_failed_attempt_followed_by_passing_attempt_gives_fix_hint_cut_to_40_lines(tmp_path):
@@ -358,16 +359,12 @@ def test_extract_from_ledger_read_only_and_missing_db(tmp_path):
     ro_conn.close()
 
 
-def test_evidence_hashes_computed_from_files_json_or_diff():
-    """evidence_hashes computes sha256 of files when present in files_json or diff, else empty."""
-    import hashlib
+def test_evidence_paths_computed_and_deduplicated():
+    """evidence_paths is a sorted list of repo-relative paths, empty when no file, and merged via union."""
     from jev.memory_extract import extract_compile_traps
 
-    file_content = "def calculate():\n    return 42\n"
-    expected_hash = hashlib.sha256(file_content.encode("utf-8")).hexdigest()
-
-    # 1. File content in files_json dict
-    att_files_json = {
+    # 1. Error with file -> evidence_paths has [norm_file], no evidence_hashes attribute
+    att1 = {
         "run_id": "r-ev1",
         "subgoal_id": "sg-1",
         "attempt_no": 1,
@@ -375,44 +372,53 @@ def test_evidence_hashes_computed_from_files_json_or_diff():
         "outcome": "mechanical_failure",
         "failed_check": "compile",
         "compile_errors_json": json.dumps([{"file": "src/math.py", "code": "E1", "message": "error"}]),
-        "files_json": json.dumps({"src/math.py": file_content}),
+        "files_json": json.dumps(["src/math.py"]),
     }
-    facts1 = extract_compile_traps(attempts=[att_files_json])
+    facts1 = extract_compile_traps(attempts=[att1])
     assert len(facts1) == 1
-    assert facts1[0].evidence_hashes.get("src/math.py") == expected_hash
+    assert facts1[0].evidence_paths == ["src/math.py"]
+    assert not hasattr(facts1[0], "evidence_hashes")
 
-    # 2. File in diff additions
-    diff_content = "diff --git a/src/math.py b/src/math.py\n--- /dev/null\n+++ b/src/math.py\n@@ -0,0 +1,2 @@\n+def calculate():\n+    return 42"
-    diff_hash = hashlib.sha256(b"def calculate():\nreturn 42" if False else "def calculate():\n    return 42".encode("utf-8")).hexdigest()
-    att_diff = {
+    # 2. Error without file -> evidence_paths is []
+    att2 = {
         "run_id": "r-ev2",
-        "subgoal_id": "sg-1",
+        "subgoal_id": "sg-2",
+        "attempt_no": 1,
+        "tier": "mechanical",
+        "outcome": "mechanical_failure",
+        "failed_check": "compile",
+        "compile_errors_json": json.dumps([{"file": "", "code": "E1", "message": "error no file"}]),
+    }
+    facts2 = extract_compile_traps(attempts=[att2])
+    assert len(facts2) == 1
+    assert facts2[0].evidence_paths == []
+
+    # 3. Deduplication merges evidence_paths as sorted union
+    att3a = {
+        "run_id": "r-ev3",
+        "subgoal_id": "sg-3",
         "attempt_no": 1,
         "tier": "mechanical",
         "outcome": "mechanical_failure",
         "failed_check": "compile",
         "compile_errors_json": json.dumps([{"file": "src/math.py", "code": "E1", "message": "error"}]),
-        "diff": diff_content,
+        "files_json": json.dumps(["src/math.py"]),
+        "created_at": "2026-10-17T10:00:00Z",
     }
-    facts2 = extract_compile_traps(attempts=[att_diff])
-    assert len(facts2) == 1
-    assert facts2[0].evidence_hashes.get("src/math.py") == diff_hash
-
-    # 3. File absent from files_json and diff -> empty mapping
-    att_none = {
+    att3b = {
         "run_id": "r-ev3",
-        "subgoal_id": "sg-1",
-        "attempt_no": 1,
+        "subgoal_id": "sg-3",
+        "attempt_no": 2,
         "tier": "mechanical",
         "outcome": "mechanical_failure",
         "failed_check": "compile",
-        "compile_errors_json": json.dumps([{"file": "src/absent.py", "code": "E1", "message": "error"}]),
-        "diff": "diff --git a/other.py b/other.py\n+x=1",
-        "files_json": json.dumps(["other.py"]),
+        "compile_errors_json": json.dumps([{"file": "src/math.py", "code": "E1", "message": "error"}]),
+        "files_json": json.dumps(["src/math.py"]),
+        "created_at": "2026-10-17T10:05:00Z",
     }
-    facts3 = extract_compile_traps(attempts=[att_none])
+    facts3 = extract_compile_traps(attempts=[att3a, att3b])
     assert len(facts3) == 1
-    assert facts3[0].evidence_hashes == {}
+    assert facts3[0].evidence_paths == ["src/math.py"]
 
 
 def test_empty_message_dropped_even_with_file_or_code():
@@ -481,7 +487,8 @@ def test_fix_hint_retained_from_most_recent_occurrence_with_fix():
     fact = facts[0]
     assert fact.count == 2
     assert fact.provenance.run_id == "r-2"  # Most recent occurrence
-    assert fact.fix_hint == "+fix attempt 1"  # Retained from most recent occurrence with fix
+    assert fact.fix_hint is not None
+    assert "+ fix attempt 1" in fact.fix_hint  # Retained from most recent occurrence with fix
     assert fact.provenance.fix_attempt_no == 2
     assert fact.provenance.fix_commit == "sha-fix-1"
 
@@ -516,7 +523,8 @@ def test_feedback_sent_derives_fact_for_build_or_compile():
     assert fact.signature[0] == "SyntaxError"
     assert fact.signature[1] == "src/app.py"
     assert fact.signature[2] == "expected ':'"
-    assert fact.fix_hint == "+good diff"
+    assert fact.fix_hint is not None
+    assert "+ good diff" in fact.fix_hint
 
 
 def test_other_failed_checks_with_feedback_sent_produce_no_fact():
@@ -638,5 +646,249 @@ def test_empty_code_remains_empty_string_and_statement_formatting():
     f_no_file = next(f for f in facts if f.signature[1] == "")
     assert f_no_file.signature[0] == ""
     assert f_no_file.statement == "Attempt failed Tier 0: unparsed error no file"
+
+
+def test_fix_hint_delta_failing_vs_passing_diff():
+    """failing diff '+def add(a, b)' vs passing diff '+def add(a, b):' gives hint containing '- def add(a, b)' and '+ def add(a, b):' and NOT unchanged context lines."""
+    from jev.memory_extract import extract_compile_traps
+
+    fail_diff = "diff --git a/src/app.py b/src/app.py\n def existing():\n     pass\n+def add(a, b)"
+    pass_diff = "diff --git a/src/app.py b/src/app.py\n def existing():\n     pass\n+def add(a, b):"
+
+    att1 = {
+        "run_id": "r-delta",
+        "subgoal_id": "sg-delta",
+        "attempt_no": 1,
+        "tier": "mechanical",
+        "outcome": "mechanical_failure",
+        "failed_check": "compile",
+        "compile_errors_json": json.dumps([{"file": "src/app.py", "code": "E1", "message": "syntax error"}]),
+        "diff": fail_diff,
+        "files_json": json.dumps(["src/app.py"]),
+    }
+    att2 = {
+        "run_id": "r-delta",
+        "subgoal_id": "sg-delta",
+        "attempt_no": 2,
+        "tier": "semantic",
+        "outcome": "passed",
+        "diff": pass_diff,
+    }
+    facts = extract_compile_traps(attempts=[att1, att2])
+    assert len(facts) == 1
+    hint = facts[0].fix_hint
+    assert hint is not None
+    assert "- def add(a, b)" in hint
+    assert "+ def add(a, b):" in hint
+    assert "def existing():" not in hint
+
+
+def test_fix_hint_delta_multi_file():
+    """Multi-file delta groups by file with 'file: <path>' header and skips files with no delta."""
+    from jev.memory_extract import extract_compile_traps
+
+    fail_diff = (
+        "diff --git a/src/a.py b/src/a.py\n+bad_a = 1\n"
+        "diff --git a/src/unchanged.py b/src/unchanged.py\n+same = 1\n"
+        "diff --git a/src/b.py b/src/b.py\n+bad_b = 2\n"
+    )
+    pass_diff = (
+        "diff --git a/src/a.py b/src/a.py\n+good_a = 1\n"
+        "diff --git a/src/unchanged.py b/src/unchanged.py\n+same = 1\n"
+        "diff --git a/src/b.py b/src/b.py\n+good_b = 2\n"
+    )
+    att1 = {
+        "run_id": "r-mf",
+        "subgoal_id": "sg-mf",
+        "attempt_no": 1,
+        "tier": "mechanical",
+        "outcome": "mechanical_failure",
+        "failed_check": "compile",
+        "compile_errors_json": json.dumps([{"file": "src/a.py", "code": "E1", "message": "error a"}]),
+        "diff": fail_diff,
+        "files_json": json.dumps(["src/a.py", "src/b.py", "src/unchanged.py"]),
+    }
+    att2 = {
+        "run_id": "r-mf",
+        "subgoal_id": "sg-mf",
+        "attempt_no": 2,
+        "tier": "semantic",
+        "outcome": "passed",
+        "diff": pass_diff,
+    }
+    facts = extract_compile_traps(attempts=[att1, att2])
+    assert len(facts) == 1
+    hint = facts[0].fix_hint
+    assert "file: src/a.py" in hint
+    assert "file: src/b.py" in hint
+    assert "src/unchanged.py" not in hint
+    assert "- bad_a = 1" in hint
+    assert "+ good_a = 1" in hint
+    assert "- bad_b = 2" in hint
+    assert "+ good_b = 2" in hint
+
+
+def test_fix_hint_delta_identical_diffs_give_none():
+    """Identical diffs between failing and passing attempt yield fix_hint None."""
+    from jev.memory_extract import extract_compile_traps
+
+    diff = "diff --git a/src/a.py b/src/a.py\n+same = 1"
+    att1 = {
+        "run_id": "r-id",
+        "subgoal_id": "sg-id",
+        "attempt_no": 1,
+        "tier": "mechanical",
+        "outcome": "mechanical_failure",
+        "failed_check": "compile",
+        "compile_errors_json": json.dumps([{"file": "src/a.py", "code": "E1", "message": "error"}]),
+        "diff": diff,
+    }
+    att2 = {
+        "run_id": "r-id",
+        "subgoal_id": "sg-id",
+        "attempt_no": 2,
+        "tier": "semantic",
+        "outcome": "passed",
+        "diff": diff,
+    }
+    facts = extract_compile_traps(attempts=[att1, att2])
+    assert len(facts) == 1
+    assert facts[0].fix_hint is None
+
+
+def test_fix_hint_delta_cap():
+    """Delta output is capped at 40 lines and 3000 characters."""
+    from jev.memory_extract import extract_compile_traps
+
+    fail_diff = "diff --git a/src/big.py b/src/big.py\n" + "\n".join(f"+fail_{i} = {i}" for i in range(50))
+    pass_diff = "diff --git a/src/big.py b/src/big.py\n" + "\n".join(f"+pass_{i} = {i}" for i in range(50))
+    att1 = {
+        "run_id": "r-cap",
+        "subgoal_id": "sg-cap",
+        "attempt_no": 1,
+        "tier": "mechanical",
+        "outcome": "mechanical_failure",
+        "failed_check": "compile",
+        "compile_errors_json": json.dumps([{"file": "src/big.py", "code": "E1", "message": "error"}]),
+        "diff": fail_diff,
+    }
+    att2 = {
+        "run_id": "r-cap",
+        "subgoal_id": "sg-cap",
+        "attempt_no": 2,
+        "tier": "semantic",
+        "outcome": "passed",
+        "diff": pass_diff,
+    }
+    facts = extract_compile_traps(attempts=[att1, att2])
+    assert len(facts) == 1
+    assert facts[0].fix_hint is not None
+    assert len(facts[0].fix_hint.splitlines()) <= 40
+    assert len(facts[0].fix_hint) <= 3000
+
+
+def test_fix_hint_delta_byte_identical_across_two_calls():
+    """Delta computation is byte-identical across two separate calls."""
+    from jev.memory_extract import extract_compile_traps
+
+    fail_diff = "diff --git a/src/z.py b/src/z.py\n+z_fail\ndiff --git a/src/a.py b/src/a.py\n+a_fail"
+    pass_diff = "diff --git a/src/z.py b/src/z.py\n+z_pass\ndiff --git a/src/a.py b/src/a.py\n+a_pass"
+    att1 = {
+        "run_id": "r-det",
+        "subgoal_id": "sg-det",
+        "attempt_no": 1,
+        "tier": "mechanical",
+        "outcome": "mechanical_failure",
+        "failed_check": "compile",
+        "compile_errors_json": json.dumps([{"file": "src/a.py", "code": "E1", "message": "error"}]),
+        "diff": fail_diff,
+    }
+    att2 = {
+        "run_id": "r-det",
+        "subgoal_id": "sg-det",
+        "attempt_no": 2,
+        "tier": "semantic",
+        "outcome": "passed",
+        "diff": pass_diff,
+    }
+    facts_a = extract_compile_traps(attempts=[att1, att2])
+    facts_b = extract_compile_traps(attempts=[att1, att2])
+    assert facts_a[0].fix_hint == facts_b[0].fix_hint
+
+
+def test_extract_from_ledger_repo_key_parent_folder(tmp_path):
+    """A ledger at tmp/repos/abc123/ledger.db yields repo_key 'abc123'."""
+    from jev.memory_extract import extract_from_ledger
+
+    repo_dir = tmp_path / "repos" / "abc123"
+    repo_dir.mkdir(parents=True)
+    db_path = repo_dir / "ledger.db"
+    ledger = SqliteLedger(db_path=db_path)
+    run_id = "run-rk1"
+    ledger.record_run_start(run_id=run_id, thread_id="t-1", ticket="Bug")
+    ledger.record_attempt(
+        run_id=run_id,
+        subgoal_id="sg-1",
+        tier="mechanical",
+        outcome="mechanical_failure",
+        failed_check="compile",
+        compile_errors=[{"file": "src/app.py", "code": "E1", "message": "error"}],
+        diff="+bad",
+    )
+
+    facts = extract_from_ledger(db_path)
+    assert len(facts) == 1
+    assert facts[0].repo_key == "abc123"
+
+
+def test_extract_from_ledger_repo_key_explicit_wins(tmp_path):
+    """An explicit repo_key wins over the parent folder name."""
+    from jev.memory_extract import extract_from_ledger
+
+    repo_dir = tmp_path / "repos" / "abc123"
+    repo_dir.mkdir(parents=True)
+    db_path = repo_dir / "ledger.db"
+    ledger = SqliteLedger(db_path=db_path)
+    run_id = "run-rk2"
+    ledger.record_run_start(run_id=run_id, thread_id="t-1", ticket="Bug")
+    ledger.record_attempt(
+        run_id=run_id,
+        subgoal_id="sg-1",
+        tier="mechanical",
+        outcome="mechanical_failure",
+        failed_check="compile",
+        compile_errors=[{"file": "src/app.py", "code": "E1", "message": "error"}],
+        diff="+bad",
+    )
+
+    facts = extract_from_ledger(db_path, repo_key="explicit_win")
+    assert len(facts) == 1
+    assert facts[0].repo_key == "explicit_win"
+
+
+def test_extract_from_ledger_repo_key_elsewhere_yields_none(tmp_path):
+    """A ledger elsewhere yields repo_key None."""
+    from jev.memory_extract import extract_from_ledger
+
+    other_dir = tmp_path / "other_folder"
+    other_dir.mkdir(parents=True)
+    db_path = other_dir / "ledger.db"
+    ledger = SqliteLedger(db_path=db_path)
+    run_id = "run-rk3"
+    ledger.record_run_start(run_id=run_id, thread_id="t-1", ticket="Bug")
+    ledger.record_attempt(
+        run_id=run_id,
+        subgoal_id="sg-1",
+        tier="mechanical",
+        outcome="mechanical_failure",
+        failed_check="compile",
+        compile_errors=[{"file": "src/app.py", "code": "E1", "message": "error"}],
+        diff="+bad",
+    )
+
+    facts = extract_from_ledger(db_path)
+    assert len(facts) == 1
+    assert facts[0].repo_key is None
+
 
 
