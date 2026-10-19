@@ -127,10 +127,14 @@ def compute_diff_delta(
 
         file_header = f"file: {f}" if f else "file: unknown"
         file_lines = [file_header]
-        for r in removed:
-            file_lines.append(f"- {r[1:]}")
-        for a in added:
-            file_lines.append(f"+ {a[1:]}")
+        if removed:
+            file_lines.append("failed attempt only:")
+            for r in removed:
+                file_lines.append(r)
+        if added:
+            file_lines.append("passing attempt only:")
+            for a in added:
+                file_lines.append(a)
 
         delta_blocks.append("\n".join(file_lines))
 

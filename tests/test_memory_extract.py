@@ -488,7 +488,8 @@ def test_fix_hint_retained_from_most_recent_occurrence_with_fix():
     assert fact.count == 2
     assert fact.provenance.run_id == "r-2"  # Most recent occurrence
     assert fact.fix_hint is not None
-    assert "+ fix attempt 1" in fact.fix_hint  # Retained from most recent occurrence with fix
+    assert "passing attempt only:" in fact.fix_hint
+    assert "+fix attempt 1" in fact.fix_hint  # Retained from most recent occurrence with fix
     assert fact.provenance.fix_attempt_no == 2
     assert fact.provenance.fix_commit == "sha-fix-1"
 
@@ -524,7 +525,8 @@ def test_feedback_sent_derives_fact_for_build_or_compile():
     assert fact.signature[1] == "src/app.py"
     assert fact.signature[2] == "expected ':'"
     assert fact.fix_hint is not None
-    assert "+ good diff" in fact.fix_hint
+    assert "passing attempt only:" in fact.fix_hint
+    assert "+good diff" in fact.fix_hint
 
 
 def test_other_failed_checks_with_feedback_sent_produce_no_fact():
@@ -648,8 +650,99 @@ def test_empty_code_remains_empty_string_and_statement_formatting():
     assert f_no_file.statement == "Attempt failed Tier 0: unparsed error no file"
 
 
+def test_fix_hint_exact_rendering():
+    """Exact test from prompt: base file has 'def add(a, b):', failing has extra line changes, passing only fixes return line."""
+    from jev.memory_extract import extract_compile_traps
+
+    fail_diff = (
+        "diff --git a/src/app.py b/src/app.py\n"
+        "--- a/src/app.py\n"
+        "+++ b/src/app.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        "-def add(a, b):\n"
+        "-    return a + b\n"
+        "+def add(a, b)\n"
+        "+    return a + b + 1\n"
+    )
+    pass_diff = (
+        "diff --git a/src/app.py b/src/app.py\n"
+        "--- a/src/app.py\n"
+        "+++ b/src/app.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        "-    return a + b\n"
+        "+    return a + b + 1\n"
+    )
+
+    att1 = {
+        "run_id": "r-exact",
+        "subgoal_id": "sg-exact",
+        "attempt_no": 1,
+        "tier": "mechanical",
+        "outcome": "mechanical_failure",
+        "failed_check": "compile",
+        "compile_errors_json": json.dumps([{"file": "src/app.py", "code": "E1", "message": "syntax error"}]),
+        "diff": fail_diff,
+        "files_json": json.dumps(["src/app.py"]),
+    }
+    att2 = {
+        "run_id": "r-exact",
+        "subgoal_id": "sg-exact",
+        "attempt_no": 2,
+        "tier": "semantic",
+        "outcome": "passed",
+        "diff": pass_diff,
+    }
+    facts = extract_compile_traps(attempts=[att1, att2])
+    assert len(facts) == 1
+    expected = (
+        "file: src/app.py\n"
+        "failed attempt only:\n"
+        "-def add(a, b):\n"
+        "+def add(a, b)"
+    )
+    assert facts[0].fix_hint == expected
+
+
+def test_fix_hint_both_sections_non_empty():
+    """Both failed attempt only and passing attempt only sections are rendered when non-empty."""
+    from jev.memory_extract import extract_compile_traps
+
+    fail_diff = "diff --git a/src/app.py b/src/app.py\n+bad_line = 1\n"
+    pass_diff = "diff --git a/src/app.py b/src/app.py\n+good_line = 1\n"
+
+    att1 = {
+        "run_id": "r-both",
+        "subgoal_id": "sg-both",
+        "attempt_no": 1,
+        "tier": "mechanical",
+        "outcome": "mechanical_failure",
+        "failed_check": "compile",
+        "compile_errors_json": json.dumps([{"file": "src/app.py", "code": "E1", "message": "syntax error"}]),
+        "diff": fail_diff,
+        "files_json": json.dumps(["src/app.py"]),
+    }
+    att2 = {
+        "run_id": "r-both",
+        "subgoal_id": "sg-both",
+        "attempt_no": 2,
+        "tier": "semantic",
+        "outcome": "passed",
+        "diff": pass_diff,
+    }
+    facts = extract_compile_traps(attempts=[att1, att2])
+    assert len(facts) == 1
+    expected = (
+        "file: src/app.py\n"
+        "failed attempt only:\n"
+        "+bad_line = 1\n"
+        "passing attempt only:\n"
+        "+good_line = 1"
+    )
+    assert facts[0].fix_hint == expected
+
+
 def test_fix_hint_delta_failing_vs_passing_diff():
-    """failing diff '+def add(a, b)' vs passing diff '+def add(a, b):' gives hint containing '- def add(a, b)' and '+ def add(a, b):' and NOT unchanged context lines."""
+    """failing diff '+def add(a, b)' vs passing diff '+def add(a, b):' gives hint with sections and keeps markers."""
     from jev.memory_extract import extract_compile_traps
 
     fail_diff = "diff --git a/src/app.py b/src/app.py\n def existing():\n     pass\n+def add(a, b)"
@@ -678,8 +771,8 @@ def test_fix_hint_delta_failing_vs_passing_diff():
     assert len(facts) == 1
     hint = facts[0].fix_hint
     assert hint is not None
-    assert "- def add(a, b)" in hint
-    assert "+ def add(a, b):" in hint
+    assert "failed attempt only:\n+def add(a, b)" in hint
+    assert "passing attempt only:\n+def add(a, b):" in hint
     assert "def existing():" not in hint
 
 
@@ -720,12 +813,12 @@ def test_fix_hint_delta_multi_file():
     assert len(facts) == 1
     hint = facts[0].fix_hint
     assert "file: src/a.py" in hint
+    assert "failed attempt only:\n+bad_a = 1" in hint
+    assert "passing attempt only:\n+good_a = 1" in hint
     assert "file: src/b.py" in hint
+    assert "failed attempt only:\n+bad_b = 2" in hint
+    assert "passing attempt only:\n+good_b = 2" in hint
     assert "src/unchanged.py" not in hint
-    assert "- bad_a = 1" in hint
-    assert "+ good_a = 1" in hint
-    assert "- bad_b = 2" in hint
-    assert "+ good_b = 2" in hint
 
 
 def test_fix_hint_delta_identical_diffs_give_none():
