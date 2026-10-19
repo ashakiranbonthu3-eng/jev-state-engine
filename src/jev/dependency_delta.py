@@ -138,6 +138,16 @@ LOCKFILES = {
     "Podfile.lock",
 }
 
+MANIFEST_BASENAMES = {
+    "package.json",
+    "pyproject.toml",
+    "go.mod",
+    "Cargo.toml",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+}
+
 
 def _is_unsupported_manifest(basename: str) -> bool:
     if basename in KNOWN_UNSUPPORTED_BASENAMES:
