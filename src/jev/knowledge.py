@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -159,7 +160,7 @@ class MemoryStore(Protocol):
 
     def list_facts(self, status: Optional[str] = None) -> List[Dict[str, Any]]: ...
 
-    def forget(self, fact_id: Optional[str] = None) -> None: ...
+    def forget(self, fact_id: Optional[str] = None) -> Optional[int]: ...
 
     def count(self) -> int: ...
 
@@ -173,12 +174,15 @@ class KnowledgeStore:
         repo_key: str,
         ttl_days: int = 30,
         clock: Optional[Callable[[], datetime]] = None,
+        readonly: bool = False,
     ):
         self.db_path = Path(db_path)
         self.repo_key = repo_key
         self.ttl_days = ttl_days
         self._clock = clock if clock is not None else (lambda: datetime.now(timezone.utc))
-        self._init_db()
+        self.readonly = readonly
+        if not readonly:
+            self._init_db()
 
     def _now(self) -> datetime:
         dt = self._clock()
@@ -190,22 +194,25 @@ class KnowledgeStore:
         if str(self.db_path) != ":memory:":
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             if self.db_path.exists():
+                conn = None
                 try:
                     conn = sqlite3.connect(str(self.db_path))
-                    with conn:
-                        cur = conn.cursor()
-                        cur.execute("PRAGMA quick_check")
-                        row = cur.fetchone()
-                        if not row or row[0] != "ok":
-                            raise sqlite3.DatabaseError(f"Corrupt database quick_check: {row}")
-                        cur.execute("PRAGMA user_version")
+                    cur = conn.cursor()
+                    cur.execute("PRAGMA quick_check")
+                    row = cur.fetchone()
+                    if not row or row[0] != "ok":
+                        raise sqlite3.DatabaseError(f"Corrupt database quick_check: {row}")
+                    cur.execute("PRAGMA user_version")
+                    cur.close()
                     conn.close()
+                    conn = None
                 except Exception as e:
                     logger.warning("Corrupt knowledge.db detected at %s, recreating empty: %s", self.db_path, e)
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
+                    if conn:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
                     if self.db_path.exists():
                         try:
                             self.db_path.unlink()
@@ -214,6 +221,10 @@ class KnowledgeStore:
 
         try:
             with self._connect(readonly=False) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='facts'")
+                if cur.fetchone():
+                    return
                 conn.execute("PRAGMA user_version = 1")
                 conn.execute(
                     """
@@ -245,16 +256,21 @@ class KnowledgeStore:
             else:
                 raise
 
-    def _connect(self, readonly: bool = False) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self, readonly: bool = False):
+        ro = readonly or self.readonly
         if str(self.db_path) == ":memory:":
             conn = sqlite3.connect(":memory:")
-        elif readonly:
+        elif ro:
             uri = f"{self.db_path.resolve().as_uri()}?mode=ro"
             conn = sqlite3.connect(uri, uri=True)
         else:
             conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def upsert_traps(
         self, traps: Sequence[CompileTrap], repo_dir: Union[str, Path]
@@ -473,14 +489,16 @@ class KnowledgeStore:
                 cur.execute("SELECT * FROM facts ORDER BY last_seen DESC, id ASC")
             return [dict(r) for r in cur.fetchall()]
 
-    def forget(self, fact_id: Optional[str] = None) -> None:
+    def forget(self, fact_id: Optional[str] = None) -> int:
         with self._connect(readonly=False) as conn:
             cur = conn.cursor()
             if fact_id is None:
                 cur.execute("DELETE FROM facts")
             else:
                 cur.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
+            deleted = cur.rowcount
             conn.commit()
+            return deleted
 
     def count(self) -> int:
         with self._connect(readonly=True) as conn:
@@ -509,8 +527,8 @@ class NullMemory:
     def list_facts(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
         return []
 
-    def forget(self, fact_id: Optional[str] = None) -> None:
-        pass
+    def forget(self, fact_id: Optional[str] = None) -> int:
+        return 0
 
     def count(self) -> int:
         return 0
