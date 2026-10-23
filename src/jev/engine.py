@@ -2166,6 +2166,11 @@ def _snapshot_attempt(
     qwen_postmortem: Optional[str] = None,
     qwen_latency_ms: Optional[float] = None,
     qwen_error: Optional[str] = None,
+    laya_verdict: Optional[bool] = None,
+    laya_reason: Optional[str] = None,
+    laya_latency_ms: Optional[float] = None,
+    laya_error: Optional[str] = None,
+    judges_agree: Optional[bool] = None,
 ) -> None:
     """Helper to snapshot an attempt row to the ledger."""
     if not recorder:
@@ -2233,6 +2238,11 @@ def _snapshot_attempt(
         qwen_postmortem=qwen_postmortem,
         qwen_latency_ms=qwen_latency_ms,
         qwen_error=qwen_error,
+        laya_verdict=laya_verdict,
+        laya_reason=laya_reason,
+        laya_latency_ms=laya_latency_ms,
+        laya_error=laya_error,
+        judges_agree=judges_agree,
     )
 
 
@@ -2245,6 +2255,7 @@ def _invoke_qwen_strike_postmortem(
     diff: str,
     current_tier_strikes: int,
     jev_verdict: Optional[Any] = None,
+    laya_opinion: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[str], Optional[float], Optional[str]]:
     """Invokes Qwen advisory post-mortem for a rejected attempt without altering gate outcomes."""
     effective_client = qwen_client if qwen_client is not None else state.get("qwen_client")
@@ -2275,6 +2286,7 @@ def _invoke_qwen_strike_postmortem(
             thread_id=thread_id,
             subgoal_id=subgoal_id,
             strike_idx=total_strikes,
+            laya_opinion=laya_opinion,
         )
         if res:
             strike_history.append({
@@ -2299,6 +2311,7 @@ def node_gate(
     gatekeeper: Optional[Any] = None,
     recorder: Optional[Any] = None,
     qwen_client: Optional[Any] = None,
+    laya_client: Optional[Any] = None,
 ) -> State:
     """The Two-Tier Gate Router.
 
@@ -2726,6 +2739,41 @@ def node_gate(
         "reason": getattr(verdict, "reason", None),
     }
 
+    # Part A: Laya secondary (shadow) judge - unanchored evaluation after Tier 0 and Jev
+    laya_verdict = None
+    laya_reason = None
+    laya_latency_ms = None
+    laya_error = None
+    judges_agree = None
+
+    effective_laya = laya_client if laya_client is not None else state.get("laya_client")
+    if effective_laya and getattr(effective_laya, "enabled", False):
+        try:
+            laya_res = effective_laya.evaluate(
+                subgoal_description=subgoal.description,
+                subgoal_scope=subgoal.scope,
+                diff=diff,
+                investigation_notes=inv_notes,
+                mechanical_detail=mech_result.detail,
+                dependency_delta=attempt_dep_delta_obj.model_dump() if attempt_dep_delta_obj else None,
+            )
+            laya_verdict = laya_res.verdict
+            laya_reason = laya_res.reason
+            laya_latency_ms = laya_res.latency_ms
+            laya_error = laya_res.error
+            if laya_verdict is not None and getattr(verdict, "valid", None) is not None:
+                judges_agree = (verdict.valid == laya_verdict)
+            prob_str = f"{laya_res.probability:.4f}" if getattr(laya_res, "probability", None) is not None else "N/A"
+            logger.info(
+                f"[SHADOW JUDGE] >>> Subgoal: '{subgoal.description[:40]}...'\n"
+                f"  • Jev  (Authority): valid={verdict.valid} (p={getattr(verdict, 'probability', 1.0):.2f})\n"
+                f"  • Laya (Shadow)   : valid={laya_verdict} (p={prob_str}) [{laya_latency_ms}ms]\n"
+                f"  • Agreement       : {judges_agree}"
+            )
+        except Exception as exc:
+            logger.warning(f"[LAYA] Shadow evaluation exception: {exc}")
+            laya_error = str(exc)
+
     if verdict.valid:
         wt_path = state.get("current_worktree_path")
         wt_branch = state.get("current_worktree_branch")
@@ -2871,6 +2919,11 @@ def node_gate(
             evidence_level=ev_level,
             dependency_delta=attempt_dep_delta,
             jev_state_keys=jev_keys,
+            laya_verdict=laya_verdict,
+            laya_reason=laya_reason,
+            laya_latency_ms=laya_latency_ms,
+            laya_error=laya_error,
+            judges_agree=judges_agree,
         )
         if safe_rec:
             safe_rec.record_subgoal_committed(run_id, subgoal_id, parent_sha=parent_sha, commit_sha=commit_sha)
@@ -2884,6 +2937,11 @@ def node_gate(
             "test_runner": test_runner_telemetry,
             "jev_request": jev_request_telemetry,
             "jev_verdict": jev_verdict_telemetry,
+            "laya_verdict": laya_verdict,
+            "laya_reason": laya_reason,
+            "laya_latency_ms": laya_latency_ms,
+            "laya_error": laya_error,
+            "judges_agree": judges_agree,
         })
         return state
     else:
@@ -2913,6 +2971,13 @@ def node_gate(
             )
 
         sem_reason = verdict.reason or state.get("last_feedback") or "Semantic validation rejected by Gatekeeper."
+        laya_opinion = None
+        if judges_agree is False:
+            laya_opinion = {
+                "verdict": laya_verdict,
+                "reason": laya_reason,
+            }
+
         qwen_pm, qwen_lat, qwen_err = _invoke_qwen_strike_postmortem(
             state=state,
             qwen_client=qwen_client,
@@ -2922,6 +2987,7 @@ def node_gate(
             diff=diff,
             current_tier_strikes=current_sem_strikes,
             jev_verdict=verdict,
+            laya_opinion=laya_opinion,
         )
 
         if retry_intel != "off":
@@ -2949,6 +3015,11 @@ def node_gate(
             qwen_postmortem=qwen_pm,
             qwen_latency_ms=qwen_lat,
             qwen_error=qwen_err,
+            laya_verdict=laya_verdict,
+            laya_reason=laya_reason,
+            laya_latency_ms=laya_latency_ms,
+            laya_error=laya_error,
+            judges_agree=judges_agree,
         )
         _teardown_worktree(state, workspace)
 
@@ -2970,6 +3041,11 @@ def node_gate(
             "qwen_postmortem": qwen_pm,
             "qwen_latency_ms": qwen_lat,
             "qwen_error": qwen_err,
+            "laya_verdict": laya_verdict,
+            "laya_reason": laya_reason,
+            "laya_latency_ms": laya_latency_ms,
+            "laya_error": laya_error,
+            "judges_agree": judges_agree,
         })
 
         if current_sem_strikes >= 3:
@@ -3465,6 +3541,7 @@ class JevEngine:
         dep_delta_jev: str = "off",
         max_investigation_turns: int = 20,
         qwen_client: Optional[Any] = None,
+        laya_client: Optional[Any] = None,
     ):
         self.workspace = workspace
         self.gatekeeper = gatekeeper
@@ -3475,6 +3552,7 @@ class JevEngine:
         self.dep_delta_jev = dep_delta_jev
         self.max_investigation_turns = max_investigation_turns
         self.qwen_client = qwen_client
+        self.laya_client = laya_client
         if recorder is None:
             self.recorder = SafeRecorder(NullRecorder())
         elif isinstance(recorder, SafeRecorder):
@@ -3512,6 +3590,7 @@ class JevEngine:
             gatekeeper=self.gatekeeper,
             recorder=self.recorder,
             qwen_client=self.qwen_client,
+            laya_client=self.laya_client,
         )
 
     def _node_verify(self, state: State) -> State:
@@ -3685,6 +3764,7 @@ class JevEngine:
             "status": None,
             "strike_history": [],
             "total_strikes": 0,
+            "laya_enabled": getattr(self.laya_client, "enabled", False) if self.laya_client else False,
         }
 
         config: RunnableConfig = {"configurable": {"thread_id": thread_id}}

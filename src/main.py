@@ -15,6 +15,7 @@ from jev.engine import JevEngine
 from jev.evidence import format_evidence_summary
 from jev.gatekeeper import Gatekeeper
 from jev.ledger import NullRecorder, SqliteLedger
+from jev.laya import LayaConfig, LayaShadowJudge
 from jev.qwen_postmortem import QwenClient, QwenConfig
 from jev.workspace import Workspace
 
@@ -132,6 +133,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Worker LLM model name (defaults to JEV_WORKER_MODEL or gemini-3.5-flash-lite).",
     )
     parser.add_argument(
+        "--laya",
+        choices=["on", "off"],
+        default=None,
+        help="Enable Laya secondary shadow judge (on, off; defaults to JEV_LAYA or off).",
+    )
+    parser.add_argument(
         "--qwen-postmortem",
         choices=["on", "off"],
         default=None,
@@ -212,6 +219,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if qwen_client.enabled:
         qwen_client.check_health()
 
+    # Wire Laya secondary shadow judge
+    laya_config = LayaConfig.from_env_and_args(cli_laya=args.laya)
+    laya_client = LayaShadowJudge(config=laya_config)
+
     # Wire Gemini LLM via langchain-google-genai
     google_api_key = os.environ.get("GOOGLE_API_KEY")
     if not google_api_key and env_file and env_file.exists():
@@ -243,6 +254,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         repo_profile=args.repo_profile,
         dep_delta_jev=args.dep_delta_jev,
         qwen_client=qwen_client,
+        laya_client=laya_client,
     )
 
 

@@ -122,6 +122,11 @@ class Recorder(Protocol):
         qwen_postmortem: Optional[str] = None,
         qwen_latency_ms: Optional[float] = None,
         qwen_error: Optional[str] = None,
+        laya_verdict: Optional[bool] = None,
+        laya_reason: Optional[str] = None,
+        laya_latency_ms: Optional[float] = None,
+        laya_error: Optional[str] = None,
+        judges_agree: Optional[bool] = None,
     ) -> None: ...
 
     def has_run(self, run_id: str) -> bool: ...
@@ -218,6 +223,11 @@ class NullRecorder:
         qwen_postmortem: Optional[str] = None,
         qwen_latency_ms: Optional[float] = None,
         qwen_error: Optional[str] = None,
+        laya_verdict: Optional[bool] = None,
+        laya_reason: Optional[str] = None,
+        laya_latency_ms: Optional[float] = None,
+        laya_error: Optional[str] = None,
+        judges_agree: Optional[bool] = None,
     ) -> None:
         pass
 
@@ -346,6 +356,11 @@ class SqliteLedger:
                   qwen_postmortem TEXT DEFAULT NULL,
                   qwen_latency_ms REAL DEFAULT NULL,
                   qwen_error TEXT DEFAULT NULL,
+                  laya_verdict INTEGER DEFAULT NULL,
+                  laya_reason TEXT DEFAULT NULL,
+                  laya_latency_ms REAL DEFAULT NULL,
+                  laya_error TEXT DEFAULT NULL,
+                  judges_agree INTEGER DEFAULT NULL,
                   PRIMARY KEY (run_id, subgoal_id, attempt_no)
                 );
                 """
@@ -363,6 +378,16 @@ class SqliteLedger:
                 conn.execute("ALTER TABLE attempts ADD COLUMN qwen_latency_ms REAL DEFAULT NULL")
             if "qwen_error" not in att_cols:
                 conn.execute("ALTER TABLE attempts ADD COLUMN qwen_error TEXT DEFAULT NULL")
+            if "laya_verdict" not in att_cols:
+                conn.execute("ALTER TABLE attempts ADD COLUMN laya_verdict INTEGER DEFAULT NULL")
+            if "laya_reason" not in att_cols:
+                conn.execute("ALTER TABLE attempts ADD COLUMN laya_reason TEXT DEFAULT NULL")
+            if "laya_latency_ms" not in att_cols:
+                conn.execute("ALTER TABLE attempts ADD COLUMN laya_latency_ms REAL DEFAULT NULL")
+            if "laya_error" not in att_cols:
+                conn.execute("ALTER TABLE attempts ADD COLUMN laya_error TEXT DEFAULT NULL")
+            if "judges_agree" not in att_cols:
+                conn.execute("ALTER TABLE attempts ADD COLUMN judges_agree INTEGER DEFAULT NULL")
 
     def has_run(self, run_id: str) -> bool:
         with self._get_connection() as conn:
@@ -569,6 +594,11 @@ class SqliteLedger:
         qwen_postmortem: Optional[str] = None,
         qwen_latency_ms: Optional[float] = None,
         qwen_error: Optional[str] = None,
+        laya_verdict: Optional[bool] = None,
+        laya_reason: Optional[str] = None,
+        laya_latency_ms: Optional[float] = None,
+        laya_error: Optional[str] = None,
+        judges_agree: Optional[bool] = None,
     ) -> None:
         now_ts = created_at or datetime.now(timezone.utc).isoformat()
         if not isinstance(jev_state_keys, str):
@@ -584,6 +614,14 @@ class SqliteLedger:
         int_jev_valid = None
         if jev_valid is not None:
             int_jev_valid = 1 if jev_valid else 0
+
+        int_laya_valid = None
+        if laya_verdict is not None:
+            int_laya_valid = 1 if laya_verdict else 0
+
+        int_judges_agree = None
+        if judges_agree is not None:
+            int_judges_agree = 1 if judges_agree else 0
 
         with self._get_connection() as conn:
             count = conn.execute(
@@ -602,8 +640,9 @@ class SqliteLedger:
                   jev_tokens_in, jev_tokens_out,
                   feedback_sent, tokens_in, tokens_out, created_at,
                   evidence_level, dependency_delta, jev_state_keys,
-                  qwen_postmortem, qwen_latency_ms, qwen_error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  qwen_postmortem, qwen_latency_ms, qwen_error,
+                  laya_verdict, laya_reason, laya_latency_ms, laya_error, judges_agree
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -634,6 +673,11 @@ class SqliteLedger:
                     qwen_postmortem,
                     qwen_latency_ms,
                     qwen_error,
+                    int_laya_valid,
+                    laya_reason,
+                    laya_latency_ms,
+                    laya_error,
+                    int_judges_agree,
                 ),
             )
 

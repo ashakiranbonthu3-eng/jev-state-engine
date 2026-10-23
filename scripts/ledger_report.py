@@ -140,6 +140,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         if att["feedback_sent"]:
             preview = att["feedback_sent"].strip().replace("\n", " ")[:120]
             print(f"  Feedback:         {preview}")
+        if "laya_verdict" in att.keys() and att["laya_verdict"]:
+            lat = att["laya_latency_ms"]
+            lat_str = f" ({lat:.1f}ms)" if lat is not None else ""
+            agree_str = f" | Agree: {att['judges_agree']}" if att["judges_agree"] is not None else ""
+            print(f"  Laya Verdict:     {att['laya_verdict']}{lat_str}{agree_str} | Reason: {att['laya_reason']}")
+        if "laya_error" in att.keys() and att["laya_error"]:
+            print(f"  Laya Error:       {att['laya_error']}")
         if "qwen_postmortem" in att.keys() and att["qwen_postmortem"]:
             pm_data = None
             try:
@@ -158,6 +165,38 @@ def main(argv: Optional[List[str]] = None) -> int:
         if "qwen_error" in att.keys() and att["qwen_error"]:
             print(f"  Qwen Error:       {att['qwen_error']}")
         print()
+
+    print("-" * 70)
+    print("LAYA SHADOW AGREEMENT")
+    print("-" * 70)
+    laya_attempts = [
+        att for att in attempts
+        if "laya_verdict" in att.keys() and att["laya_verdict"] is not None
+    ]
+    if not laya_attempts:
+        print("  (No Laya evaluations recorded)")
+    else:
+        total = len(laya_attempts)
+        agreed = sum(1 for att in laya_attempts if att["judges_agree"] == 1 or att["judges_agree"] is True)
+        disagreed = total - agreed
+        rate = (agreed / total * 100.0) if total > 0 else 0.0
+        print(f"Total Evaluations:   {total}")
+        print(f"Agreed:              {agreed}")
+        print(f"Disagreed:           {disagreed}")
+        print(f"Agreement Rate:      {rate:.1f}%")
+        print()
+        if disagreed > 0:
+            print("Discrepancies:")
+            for att in laya_attempts:
+                if not (att["judges_agree"] == 1 or att["judges_agree"] is True):
+                    print(
+                        f"  [{att['subgoal_id']} - Attempt {att['attempt_no']}] "
+                        f"Jev Valid: {att['jev_valid']} | Laya: {att['laya_verdict']} | "
+                        f"Reason: {att['laya_reason']}"
+                    )
+        else:
+            print("No discrepancies found.")
+    print()
 
     print("-" * 70)
     print("POST-MORTEMS")

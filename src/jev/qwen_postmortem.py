@@ -146,6 +146,7 @@ def format_postmortem_prompt(
     strike_number: str,
     previous_strikes: Optional[List[Dict[str, Any]]] = None,
     max_diff_chars: int = DEFAULT_QWEN_MAX_DIFF_CHARS,
+    laya_opinion: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Constructs a deterministic prompt for Qwen post-mortem analysis."""
     # 1. Truncate diff with explicit marker if needed
@@ -174,7 +175,20 @@ def format_postmortem_prompt(
     else:
         jev_output_text = "Verdict: Not evaluated (failed prior check)\nReason: no reason provided"
 
-    # 4. Format previous strikes
+    # 4. Format Laya second opinion if available
+    laya_section = ""
+    if laya_opinion is not None:
+        laya_verdict_val = laya_opinion.get("verdict")
+        laya_verdict_str = "Valid" if laya_verdict_val is True else ("Invalid" if laya_verdict_val is False else "Unknown")
+        laya_reason_val = laya_opinion.get("reason") or "no reason provided"
+        laya_section = (
+            f"SECOND OPINION (Laya Secondary Judge):\n"
+            f"Verdict: {laya_verdict_str}\n"
+            f"Reason: {laya_reason_val}\n"
+            f"Note: Laya disagreed with the primary rejecting verdict. Consider this as an advisory second opinion.\n\n"
+        )
+
+    # 5. Format previous strikes
     if not previous_strikes:
         prev_strikes_text = "None (first strike for this ticket)"
     else:
@@ -197,6 +211,7 @@ def format_postmortem_prompt(
         f"PREVIOUS STRIKES:\n{prev_strikes_text}\n\n"
         f"REJECTING VERDICT:\nSource: {rejecting_source}\nReason / Error Output:\n{cleaned_reason}\n\n"
         f"JEV OUTPUT:\n{jev_output_text}\n\n"
+        f"{laya_section}"
         f"GIT DIFF:\n{truncated_diff}\n\n"
         "Respond with a valid JSON object strictly matching this schema:\n"
         "{\n"
@@ -315,6 +330,7 @@ class QwenClient:
         thread_id: Optional[str] = None,
         subgoal_id: Optional[str] = None,
         strike_idx: int = 1,
+        laya_opinion: Optional[Dict[str, Any]] = None,
     ) -> Optional[QwenPostmortemResult]:
         """Runs the advisory post-mortem via llama-server.
 
@@ -332,6 +348,7 @@ class QwenClient:
             strike_number=strike_number,
             previous_strikes=previous_strikes,
             max_diff_chars=self.max_diff_chars,
+            laya_opinion=laya_opinion,
         )
 
         model_to_use = self.model or "default"

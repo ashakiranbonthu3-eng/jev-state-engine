@@ -95,6 +95,8 @@ class State(TypedDict, total=False):
     qwen_client: Optional[Any]
     strike_history: Optional[List[Dict[str, Any]]]
     total_strikes: Optional[int]
+    laya_enabled: Optional[bool]
+    laya_client: Optional[Any]
 
 
 

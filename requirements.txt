@@ -7,3 +7,4 @@ langchain-core
 langchain-google-genai
 tomli; python_version < "3.11"
 typing-extensions
+laya

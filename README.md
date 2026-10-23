@@ -233,6 +233,8 @@ python -m src.main "<TICKET_DESCRIPTION>" [OPTIONS]
 | `--thread-id` | String | `run-<timestamp>-<hex>` | Unique thread identifier for state persistence. Defaults to an auto-generated timestamped ID (e.g., `run-20261012T120000Z-a1b2`). Rerunning an existing thread ID restarts from scratch (no resume) and deletes its prior integration branch. |
 | `--test-policy` | String | `auto` | Test execution policy (`auto`, `verify-only`, `never`, `always`). Controls whether test suites run on every subgoal, only during final verification, or are bypassed entirely. |
 | `--no-ledger` | Flag | `False` | Disable recording run events, subgoals, attempts, and diffs to the SQLite run ledger. |
+| `--laya` | `on\|off` | `off` | Enable Laya secondary (shadow) judge evaluating attempts unanchored (CLI flag wins over `JEV_LAYA`). |
+| `--laya-model` | String | `convaiinnovations/laya-typed-decisions` | Model identifier or HuggingFace repo for Laya (CLI flag wins over `JEV_LAYA_MODEL`). |
 | `--qwen-postmortem` | `on\|off` | `off` | Enable advisory post-mortem on gate strikes (CLI flag wins over `JEV_QWEN_POSTMORTEM`). |
 | `--qwen-url` | URL | `http://127.0.0.1:8080` | Endpoint for local llama-server (CLI flag wins over `JEV_QWEN_URL`). |
 | `--qwen-model` | String | Auto-detected | Model identifier sent in request body (CLI flag wins over `JEV_QWEN_MODEL`). |
@@ -333,6 +335,44 @@ python scripts/ledger_report.py --repo-key e374640a3fd334bc
 
 ---
 
+## Laya Secondary (Shadow) Judge
+
+The engine integrates a secondary (shadow) judge using Laya to evaluate code modifications unanchored alongside TypeSafe AI's Jev System One.
+
+### Unanchored Evaluation & Zero-Authority Guarantee
+* **Unanchored Evaluation:** Laya is invoked immediately after Tier 0 and Tier 1 Jev produce their evaluation. Laya receives the subgoal description, declared scope, staged diff, investigation notes, mechanical detail, and dependency delta. Crucially, Laya is **never** shown Jev's verdict, probability, or reasoning, ensuring completely independent evaluation free from anchoring bias.
+* **Advisory-Only Authority:** Jev System One remains the sole authority governing engine control flow. Laya evaluations never block, retry, trigger escalations, alter strike counters, or impact merge decisions. If Jev accepts a diff, the engine commits it regardless of Laya's assessment; if Jev rejects a diff, the engine increments strikes and retries regardless of Laya's assessment.
+* **Second Opinion in Post-Mortems:** When Jev rejects an attempt but Laya considers it valid (`judges_agree == False`), Laya's dissenting opinion is forwarded to the Qwen advisory post-mortem to assist in analyzing potential false rejections.
+* **Fail-Open Resilience:** Missing dependencies, model initialization failures, network timeouts, or runtime exceptions log a single warning and fail open without altering the run outcome or aborting execution.
+
+### Telemetry & Ledger Storage
+Every evaluation records:
+* `laya_verdict`: Boolean verdict (noul probability >= 0.5).
+* `laya_reason`: Model explanation or reasoning string.
+* `laya_latency_ms`: Evaluation duration in milliseconds.
+* `laya_error`: Error message if evaluation failed, else `None`.
+* `judges_agree`: Boolean indicating whether Jev and Laya agreed (`jev_valid == laya_verdict`).
+
+These metrics are stored in `trajectory` in the run state and persisted to the `attempts` table in `ledger.db`.
+
+### Configuration & Environment Variables
+
+CLI flags take precedence over environment variables, which take precedence over defaults:
+
+| Setting | CLI Flag | Environment Variable | Default | Description |
+|---|---|---|---|---|
+| Enable Laya Judge | `--laya on\|off` | `JEV_LAYA` | `off` | Enable Laya shadow evaluation |
+| Model Identifier | `--laya-model <name>` | `JEV_LAYA_MODEL` | `convaiinnovations/laya-typed-decisions` | Laya model identifier or HF repo |
+
+### Ledger Agreement Reports
+`scripts/ledger_report.py` calculates agreement rates and lists discrepancies:
+```powershell
+python scripts/ledger_report.py --repo-dir .
+```
+Outputs total evaluations where Laya was active, agreed count, disagreed count, agreement percentage, and detailed discrepancy breakdowns.
+
+---
+
 ## Qwen Advisory Strike Post-Mortem (llama.cpp)
 
 On every gate rejection or strike (Tier 0 mechanical check failures, Tier 1 Jev semantic rejections, duplicate diffs, and escalations), the engine can query a local Qwen model running via `llama-server` (OpenAI-compatible HTTP API) to perform advisory post-mortem root cause analysis.
@@ -383,6 +423,10 @@ CLI flags take precedence over environment variables, which take precedence over
 | Diff truncation marker | Mechanically Enforced | Diffs exceeding `--qwen-max-diff-chars` are truncated with an explicit `... [TRUNCATED] ...` marker. |
 | Markdown persistence outside repo | Mechanically Enforced | Post-mortems are stored under `$JEV_HOME/postmortems/<thread_id>/strike-<n>.md`; target repo working tree is never touched. |
 | Credential & secret isolation | Mechanically Enforced | Only ticket, failure reason, and truncated git diff are sent in payload; no env vars or secrets are passed. |
+| Unanchored Laya shadow evaluation | Mechanically Enforced | Laya receives only subgoal, diff, notes, and delta; Jev verdict is strictly omitted from inputs. |
+| Zero engine authority for Laya | Mechanically Enforced | Jev System One remains sole gatekeeper; Laya verdicts never alter strike counters, merge actions, or status. |
+| Fail-open resilience for Laya | Mechanically Enforced | Missing packages, exceptions, and timeouts are caught; execution proceeds uninterrupted with error recorded in ledger. |
+| Post-mortem second opinion | Mechanically Enforced | Dissenting Laya opinion is passed to Qwen post-mortem when `judges_agree` is false. |
 | Structured JSON output schema | Prompt-Only (Mechanical Fallback) | Prompts Qwen for JSON schema; parses response with fail-safe fallback to raw text if model output is malformed. |
 | Root cause & suggestion accuracy | Advisory (Prompt-Only) | Model-generated chain-of-thought and suggestions are advisory only and labeled `[Advisory analysis, may be wrong]`. |
 

@@ -67,6 +67,11 @@ def export_dataset(
             a.qwen_postmortem,
             a.qwen_latency_ms,
             a.qwen_error,
+            a.laya_verdict,
+            a.laya_reason,
+            a.laya_latency_ms,
+            a.laya_error,
+            a.judges_agree,
             a.created_at AS attempt_created_at
         FROM attempts a
         LEFT JOIN subgoals s ON a.run_id = s.run_id AND a.subgoal_id = s.subgoal_id
@@ -82,7 +87,8 @@ def export_dataset(
     with open(output_path, "w", encoding="utf-8") as f:
         for row in rows:
             qwen_raw = row["qwen_postmortem"]
-            if include_advisory_only and not qwen_raw:
+            laya_verdict = row["laya_verdict"]
+            if include_advisory_only and not (qwen_raw or laya_verdict):
                 continue
 
             qwen_parsed = None
@@ -135,6 +141,13 @@ def export_dataset(
                     "jev_raw": row["jev_raw"],
                     "jev_tokens_in": row["jev_tokens_in"],
                     "jev_tokens_out": row["jev_tokens_out"],
+                },
+                "shadow_judge": {
+                    "verdict": row["laya_verdict"],
+                    "reason": row["laya_reason"],
+                    "latency_ms": row["laya_latency_ms"],
+                    "error": row["laya_error"],
+                    "judges_agree": bool(row["judges_agree"]) if row["judges_agree"] is not None else None,
                 },
                 "advisory_model": {
                     "postmortem": qwen_parsed,
