@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Union
 
+from jev.models import ValidationVerdict
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_LAYA_MODEL = "convaiinnovations/laya-typed-decisions"
@@ -161,3 +163,71 @@ class LayaShadowJudge:
                 logger.warning(f"[LAYA] Shadow evaluation error: {exc}. Continuing fail-open.")
                 self._warned_error = True
             return LayaResult(error=str(exc), latency_ms=latency_ms)
+
+
+class LayaGatekeeper:
+    """Primary Tier 1 gatekeeper using local Laya decision model (no external Jev API required)."""
+
+    def __init__(self, laya_judge: Optional[LayaShadowJudge] = None, model: Optional[str] = None):
+        if laya_judge is not None:
+            self.laya = laya_judge
+        else:
+            config = LayaConfig(enabled=True, model=model or DEFAULT_LAYA_MODEL)
+            self.laya = LayaShadowJudge(config=config)
+        self.last_state_keys: Optional[str] = None
+
+    def validate_subgoal(
+        self,
+        subgoal: Any,
+        diff: str,
+        mechanical_detail: str = "",
+        investigation_notes: Optional[str] = None,
+        dependency_delta: Optional[Dict[str, Any]] = None,
+    ) -> ValidationVerdict:
+        desc = getattr(subgoal, "description", str(subgoal))
+        scope = getattr(subgoal, "scope", [])
+        res = self.laya.evaluate(
+            subgoal_description=desc,
+            subgoal_scope=scope,
+            diff=diff,
+            investigation_notes=investigation_notes,
+            mechanical_detail=mechanical_detail,
+            dependency_delta=dependency_delta,
+        )
+        is_valid = bool(res.verdict) if res.verdict is not None else False
+        prob = res.probability if res.probability is not None else (1.0 if is_valid else 0.0)
+        default_reason = "Diff validated by Laya Gatekeeper." if is_valid else "Diff rejected by Laya Gatekeeper."
+        return ValidationVerdict(
+            valid=is_valid,
+            probability=prob,
+            reason=res.reason or default_reason,
+            model=getattr(self.laya.config, "model", DEFAULT_LAYA_MODEL),
+        )
+
+    def verify_ticket(
+        self,
+        ticket: str,
+        final_diff: str,
+        test_output: str,
+        investigation_notes: Optional[str] = None,
+    ) -> ValidationVerdict:
+        combined_notes = f"Test output:\n{test_output}\n\nInvestigation:\n{investigation_notes or ''}"
+        res = self.laya.evaluate(
+            subgoal_description=ticket,
+            subgoal_scope=["*"],
+            diff=final_diff,
+            investigation_notes=combined_notes,
+        )
+        is_valid = bool(res.verdict) if res.verdict is not None else True
+        prob = res.probability if res.probability is not None else (1.0 if is_valid else 0.0)
+        default_reason = "Verification passed by Laya Gatekeeper." if is_valid else "Verification rejected by Laya Gatekeeper."
+        return ValidationVerdict(
+            valid=is_valid,
+            probability=prob,
+            reason=res.reason or default_reason,
+            model=getattr(self.laya.config, "model", DEFAULT_LAYA_MODEL),
+        )
+
+    def escalate_deadlock(self, *args, **kwargs) -> None:
+        pass
+
