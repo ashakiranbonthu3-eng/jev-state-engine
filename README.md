@@ -4,17 +4,17 @@ A deterministic, finite-state machine (FSM) runtime that orchestrates autonomous
 
 ```mermaid
 flowchart TD
-    START([Start]) --> Investigate["1. Investigation<br/><i>Read-Only Code Exploration</i>"]
-    Investigate --> Plan["2. Planning<br/><i>Grounding & Subgoal Generation</i>"]
+    START([Start]) --> Investigate["1. Investigation<br/>(Read-Only Code Exploration)"]
+    Investigate --> Plan["2. Planning<br/>(Grounding and Subgoal Generation)"]
     
-    Plan -->|Valid Plan| Implement["3. Implementation<br/><i>Isolated Git Worktree</i>"]
-    Plan -->|Planning Failed| Escalate["5. Escalation<br/><i>Deadlock HITL Log</i>"]
+    Plan -->|Valid Plan| Implement["3. Implementation<br/>(Isolated Git Worktree)"]
+    Plan -->|Planning Failed| Escalate["5. Escalation<br/>(Deadlock HITL Log)"]
     
-    Implement --> Gate{"4. Two-Tier Gate<br/><i>Mechanical & Semantic</i>"}
+    Implement --> Gate{"4. Two-Tier Gate<br/>(Mechanical and Semantic)"}
     
-    Gate -->|Passed & More Subgoals| Implement
-    Gate -->|Passed & Queue Empty| Verify["4b. Verification<br/><i>Test Suite & Final Diff</i>"]
-    Gate -->|Strike Limit Reached / Merge Error| Escalate
+    Gate -->|Passed and More Subgoals| Implement
+    Gate -->|Passed and Queue Empty| Verify["4b. Verification<br/>(Test Suite and Final Diff)"]
+    Gate -->|Strike Limit Reached or Merge Error| Escalate
     Gate -->|Retry Subgoal| Implement
     
     Verify -->|Verified| END([Completed])
@@ -90,16 +90,16 @@ Before any code commits to the base repository, it must clear two independent ve
 ```mermaid
 flowchart LR
     SubgoalDiff["Staged Worktree Diff"] --> Tier0{"Tier 0: Mechanical Gate"}
-    Tier0 -->|Fails AST / Scope / Tests| MechStrike["+1 Mechanical Strike<br/>(Max 3)"]
+    Tier0 -->|Fails AST, Scope, or Tests| MechStrike["+1 Mechanical Strike<br/>(Max 3)"]
     Tier0 -->|Passes| Tier1{"Tier 1: Semantic Gate<br/>(TypeSafe AI Jev System One)"}
     
-    Tier1 -->|Rejected: prob < 0.5| SemStrike["+1 Semantic Strike<br/>(Max 3)"]
-    Tier1 -->|Valid: prob >= 0.5| Merge["Fast-Forward Merge &<br/>Reset Strike Counters to 0"]
+    Tier1 -->|Rejected: prob under 0.5| SemStrike["+1 Semantic Strike<br/>(Max 3)"]
+    Tier1 -->|Valid: prob 0.5 or higher| Merge["Fast-Forward Merge and<br/>Reset Strike Counters to 0"]
     
-    MechStrike -->|Counter >= 3| Escalate["Escalate Deadlock"]
-    SemStrike -->|Counter >= 3| Escalate
-    MechStrike -->|Counter < 3| Retry["Rollback Worktree & Retry Subgoal"]
-    SemStrike -->|Counter < 3| Retry
+    MechStrike -->|Counter at least 3| Escalate["Escalate Deadlock"]
+    SemStrike -->|Counter at least 3| Escalate
+    MechStrike -->|Counter under 3| Retry["Rollback Worktree and Retry Subgoal"]
+    SemStrike -->|Counter under 3| Retry
 ```
 
 ### Tier 0: Mechanical Gating
@@ -126,7 +126,7 @@ When Tier 0 passes, the staged diff is sent to TypeSafe AI's Jev System One clas
 * **Target Endpoint:** Configured via `JEV_API_URL` (defaulting to `https://api.typesafe.ai/v1/systemone`).
 * **Calibrated Boolean Question (`noul`):** Queries `jev-latest` with the subgoal description, declared scope, staged diff, and investigation context:
   > *"Does the diff fully and correctly implement the subgoal described in state, without exceeding its declared scope?"*
-* **Probability Verdict:** Evaluates the calibrated probability score (valid when $\ge 0.5$ or explicit boolean verdict). The gatekeeper ensures the diff implements the feature completely and correctly without side-effects or style-guide violations.
+* **Probability Verdict:** Evaluates the calibrated probability score (valid when >= 0.5 or explicit boolean verdict). The gatekeeper ensures the diff implements the feature completely and correctly without side-effects or style-guide violations.
 
 ### Independent Strike Counters
 * `mechanical_strike_count` (budget: 3 strikes)
@@ -233,6 +233,12 @@ python -m src.main "<TICKET_DESCRIPTION>" [OPTIONS]
 | `--thread-id` | String | `run-<timestamp>-<hex>` | Unique thread identifier for state persistence. Defaults to an auto-generated timestamped ID (e.g., `run-20261012T120000Z-a1b2`). Rerunning an existing thread ID restarts from scratch (no resume) and deletes its prior integration branch. |
 | `--test-policy` | String | `auto` | Test execution policy (`auto`, `verify-only`, `never`, `always`). Controls whether test suites run on every subgoal, only during final verification, or are bypassed entirely. |
 | `--no-ledger` | Flag | `False` | Disable recording run events, subgoals, attempts, and diffs to the SQLite run ledger. |
+| `--qwen-postmortem` | `on\|off` | `off` | Enable advisory post-mortem on gate strikes (CLI flag wins over `JEV_QWEN_POSTMORTEM`). |
+| `--qwen-url` | URL | `http://127.0.0.1:8080` | Endpoint for local llama-server (CLI flag wins over `JEV_QWEN_URL`). |
+| `--qwen-model` | String | Auto-detected | Model identifier sent in request body (CLI flag wins over `JEV_QWEN_MODEL`). |
+| `--qwen-timeout` | Integer | `120` | Request timeout in seconds for post-mortem calls (CLI flag wins over `JEV_QWEN_TIMEOUT`). |
+| `--qwen-max-diff-chars` | Integer | `24000` | Truncation limit for diff sent to Qwen (CLI flag wins over `JEV_QWEN_MAX_DIFF_CHARS`). |
+| `--qwen-feedback` | `on\|off` | `off` | Feed advisory suggestions into worker retry prompt (CLI flag wins over `JEV_QWEN_FEEDBACK`). |
 
 ### Examples
 
@@ -323,6 +329,67 @@ python scripts/ledger_report.py --repo-key e374640a3fd334bc
     }
   ]
 }
+```
+
+---
+
+## Qwen Advisory Strike Post-Mortem (llama.cpp)
+
+On every gate rejection or strike (Tier 0 mechanical check failures, Tier 1 Jev semantic rejections, duplicate diffs, and escalations), the engine can query a local Qwen model running via `llama-server` (OpenAI-compatible HTTP API) to perform advisory post-mortem root cause analysis.
+
+### Advisory-Only Guarantee
+* **Zero Engine Blocking:** Qwen runs strictly **after** the gate has already evaluated the attempt. It never blocks, retries, or alters gate verdicts.
+* **Deterministic Strike Counting:** Strike counts and escalation logic execute identically regardless of whether Qwen is enabled or disabled.
+* **Fail-Open Resilience:** Server timeouts, connection errors, HTTP 500s, or malformed JSON fail open safely without altering the run outcome or aborting execution.
+* **Byte-Identical Retry Default:** With `--qwen-feedback off` (default), advisory reasoning is stored in telemetry and persisted to `~/.jev/postmortems/<thread_id>/strike-<n>.md`, but never injected into the worker's context. The worker's retry prompt is byte-identical to a run with Qwen disabled.
+* **Optional Advisory Feedback:** When `--qwen-feedback on` is passed, `where_it_went_wrong` and `suggested_fix` are appended to the next retry prompt, clearly labeled `[Advisory analysis, may be wrong]`.
+* **Credential Isolation:** Prompts contain only the ticket, sanitized failure diagnostic, truncated diff, and prior strike summaries. No environment variables or credentials are ever transmitted or written.
+
+### How to Run `llama-server`
+
+The engine does not start or stop `llama-server`; run your local instance before launching the engine:
+
+#### Windows PowerShell
+```powershell
+.\llama-server.exe -m <path-to-qwen.gguf> --port 8080 -c 8192
+```
+
+#### macOS / Linux
+```bash
+./llama-server -m <path-to-qwen.gguf> --port 8080 -c 8192
+```
+
+### Configuration & Environment Variables
+
+CLI flags take precedence over environment variables, which take precedence over defaults:
+
+| Setting | CLI Flag | Environment Variable | Default | Description |
+|---|---|---|---|---|
+| Enable Post-Mortem | `--qwen-postmortem on\|off` | `JEV_QWEN_POSTMORTEM` | `off` | Enable Qwen advisory post-mortem on strikes |
+| Server URL | `--qwen-url <url>` | `JEV_QWEN_URL` | `http://127.0.0.1:8080` | Endpoint for local llama-server API |
+| Model Name | `--qwen-model <name>` | `JEV_QWEN_MODEL` | Auto-detected | Model identifier sent in request body |
+| Timeout Seconds | `--qwen-timeout <sec>` | `JEV_QWEN_TIMEOUT` | `120` | Timeout in seconds for Qwen HTTP calls |
+| Max Diff Chars | `--qwen-max-diff-chars <n>` | `JEV_QWEN_MAX_DIFF_CHARS` | `24000` | Diff character cap before appending `[TRUNCATED]` |
+| Worker Feedback | `--qwen-feedback on\|off` | `JEV_QWEN_FEEDBACK` | `off` | Feed advice into worker retry prompt |
+
+### Mechanically Enforced vs. Prompt-Only Behaviors
+
+| Behavior | Mechanism | Details |
+|---|---|---|
+| Post-mortem trigger on strikes | Mechanically Enforced | Triggered deterministically in `node_gate` on mechanical failures, Jev rejections, duplicate diffs, and escalations. |
+| Strike counting & verdict invariance | Mechanically Enforced | Qwen runs after gate evaluation; verdicts and strike counter math are strictly decoupled from Qwen. |
+| Byte-identical retry prompt (`--qwen-feedback off`) | Mechanically Enforced | Retry feedback string remains completely untouched unless `--qwen-feedback on` is explicitly enabled. |
+| Fail-open on timeout / error | Mechanically Enforced | Network timeouts, unreachable ports, and non-200 responses are caught and logged; the engine continues uninterrupted. |
+| Diff truncation marker | Mechanically Enforced | Diffs exceeding `--qwen-max-diff-chars` are truncated with an explicit `... [TRUNCATED] ...` marker. |
+| Markdown persistence outside repo | Mechanically Enforced | Post-mortems are stored under `$JEV_HOME/postmortems/<thread_id>/strike-<n>.md`; target repo working tree is never touched. |
+| Credential & secret isolation | Mechanically Enforced | Only ticket, failure reason, and truncated git diff are sent in payload; no env vars or secrets are passed. |
+| Structured JSON output schema | Prompt-Only (Mechanical Fallback) | Prompts Qwen for JSON schema; parses response with fail-safe fallback to raw text if model output is malformed. |
+| Root cause & suggestion accuracy | Advisory (Prompt-Only) | Model-generated chain-of-thought and suggestions are advisory only and labeled `[Advisory analysis, may be wrong]`. |
+
+### Standalone Smoke Verification
+To verify your running `llama-server` setup manually:
+```bash
+python scripts/qwen_smoke.py --url http://127.0.0.1:8080
 ```
 
 ---

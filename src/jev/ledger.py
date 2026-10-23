@@ -119,6 +119,9 @@ class Recorder(Protocol):
         evidence_level: Optional[str] = None,
         dependency_delta: Optional[str] = None,
         jev_state_keys: Optional[str] = None,
+        qwen_postmortem: Optional[str] = None,
+        qwen_latency_ms: Optional[float] = None,
+        qwen_error: Optional[str] = None,
     ) -> None: ...
 
     def has_run(self, run_id: str) -> bool: ...
@@ -212,6 +215,9 @@ class NullRecorder:
         evidence_level: Optional[str] = None,
         dependency_delta: Optional[str] = None,
         jev_state_keys: Optional[str] = None,
+        qwen_postmortem: Optional[str] = None,
+        qwen_latency_ms: Optional[float] = None,
+        qwen_error: Optional[str] = None,
     ) -> None:
         pass
 
@@ -337,6 +343,9 @@ class SqliteLedger:
                   evidence_level TEXT,
                   dependency_delta TEXT,
                   jev_state_keys TEXT DEFAULT NULL,
+                  qwen_postmortem TEXT DEFAULT NULL,
+                  qwen_latency_ms REAL DEFAULT NULL,
+                  qwen_error TEXT DEFAULT NULL,
                   PRIMARY KEY (run_id, subgoal_id, attempt_no)
                 );
                 """
@@ -348,6 +357,12 @@ class SqliteLedger:
                 conn.execute("ALTER TABLE attempts ADD COLUMN dependency_delta TEXT DEFAULT NULL")
             if "jev_state_keys" not in att_cols:
                 conn.execute("ALTER TABLE attempts ADD COLUMN jev_state_keys TEXT DEFAULT NULL")
+            if "qwen_postmortem" not in att_cols:
+                conn.execute("ALTER TABLE attempts ADD COLUMN qwen_postmortem TEXT DEFAULT NULL")
+            if "qwen_latency_ms" not in att_cols:
+                conn.execute("ALTER TABLE attempts ADD COLUMN qwen_latency_ms REAL DEFAULT NULL")
+            if "qwen_error" not in att_cols:
+                conn.execute("ALTER TABLE attempts ADD COLUMN qwen_error TEXT DEFAULT NULL")
 
     def has_run(self, run_id: str) -> bool:
         with self._get_connection() as conn:
@@ -551,6 +566,9 @@ class SqliteLedger:
         evidence_level: Optional[str] = None,
         dependency_delta: Optional[str] = None,
         jev_state_keys: Optional[str] = None,
+        qwen_postmortem: Optional[str] = None,
+        qwen_latency_ms: Optional[float] = None,
+        qwen_error: Optional[str] = None,
     ) -> None:
         now_ts = created_at or datetime.now(timezone.utc).isoformat()
         if not isinstance(jev_state_keys, str):
@@ -583,8 +601,9 @@ class SqliteLedger:
                   jev_valid, jev_probability, jev_model, jev_raw,
                   jev_tokens_in, jev_tokens_out,
                   feedback_sent, tokens_in, tokens_out, created_at,
-                  evidence_level, dependency_delta, jev_state_keys
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  evidence_level, dependency_delta, jev_state_keys,
+                  qwen_postmortem, qwen_latency_ms, qwen_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -612,6 +631,9 @@ class SqliteLedger:
                     evidence_level,
                     dependency_delta,
                     jev_state_keys,
+                    qwen_postmortem,
+                    qwen_latency_ms,
+                    qwen_error,
                 ),
             )
 

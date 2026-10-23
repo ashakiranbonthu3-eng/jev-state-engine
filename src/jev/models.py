@@ -90,6 +90,11 @@ class State(TypedDict, total=False):
     repo_profile: Optional[str]
     repo_profile_text: Optional[str]
     dep_delta_jev: Optional[str]
+    qwen_postmortem: Optional[str]
+    qwen_feedback: Optional[str]
+    qwen_client: Optional[Any]
+    strike_history: Optional[List[Dict[str, Any]]]
+    total_strikes: Optional[int]
 
 
 

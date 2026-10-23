@@ -2,6 +2,7 @@
 """Read-only viewer for Jev State Engine run ledgers."""
 
 import argparse
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -139,7 +140,47 @@ def main(argv: Optional[List[str]] = None) -> int:
         if att["feedback_sent"]:
             preview = att["feedback_sent"].strip().replace("\n", " ")[:120]
             print(f"  Feedback:         {preview}")
+        if "qwen_postmortem" in att.keys() and att["qwen_postmortem"]:
+            pm_data = None
+            try:
+                pm_data = json.loads(att["qwen_postmortem"])
+            except Exception:
+                pass
+            if isinstance(pm_data, dict):
+                conf = pm_data.get("confidence", "unknown")
+                rc = pm_data.get("root_cause", "")
+                lat = att["qwen_latency_ms"] if "qwen_latency_ms" in att.keys() and att["qwen_latency_ms"] is not None else pm_data.get("latency_ms")
+                lat_str = f" ({lat:.1f}ms)" if lat is not None else ""
+                print(f"  Qwen Post-Mortem: Confidence: {conf}{lat_str} | Root Cause: {rc}")
+            else:
+                raw_preview = str(att["qwen_postmortem"]).strip().replace("\n", " ")[:120]
+                print(f"  Qwen Post-Mortem: {raw_preview}")
+        if "qwen_error" in att.keys() and att["qwen_error"]:
+            print(f"  Qwen Error:       {att['qwen_error']}")
         print()
+
+    print("-" * 70)
+    print("POST-MORTEMS")
+    print("-" * 70)
+    postmortems = [att for att in attempts if "qwen_postmortem" in att.keys() and att["qwen_postmortem"]]
+    if not postmortems:
+        print("  (No post-mortems recorded)")
+    for att in postmortems:
+        pm_data = None
+        try:
+            pm_data = json.loads(att["qwen_postmortem"])
+        except Exception:
+            pass
+        if isinstance(pm_data, dict):
+            conf = pm_data.get("confidence", "unknown")
+            rc = pm_data.get("root_cause", "")
+            lat = att["qwen_latency_ms"] if "qwen_latency_ms" in att.keys() and att["qwen_latency_ms"] is not None else pm_data.get("latency_ms")
+            lat_str = f" ({lat:.1f}ms)" if lat is not None else ""
+            print(f"[{att['subgoal_id']} - Attempt {att['attempt_no']}] Confidence: {conf}{lat_str} | Root Cause: {rc}")
+        else:
+            raw_preview = str(att["qwen_postmortem"]).strip().replace("\n", " ")[:120]
+            print(f"[{att['subgoal_id']} - Attempt {att['attempt_no']}] {raw_preview}")
+    print()
 
     print("=" * 70)
     return 0
