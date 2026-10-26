@@ -48,6 +48,7 @@ substep_*_report*.json
 substep_*.json
 *_report.json
 run_substep_*.py
+*.jsonl
 scratch/
 
 # IDE and OS artifacts
