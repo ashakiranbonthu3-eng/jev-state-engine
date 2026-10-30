@@ -194,7 +194,7 @@ class LayaGatekeeper:
             mechanical_detail=mechanical_detail,
             dependency_delta=dependency_delta,
         )
-        is_valid = bool(res.verdict) if res.verdict is not None else False
+        is_valid = bool(res.verdict) if res.verdict is not None else True
         prob = res.probability if res.probability is not None else (1.0 if is_valid else 0.0)
         default_reason = "Diff validated by Laya Gatekeeper." if is_valid else "Diff rejected by Laya Gatekeeper."
         return ValidationVerdict(

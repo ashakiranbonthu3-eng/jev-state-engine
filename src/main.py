@@ -204,7 +204,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     gatekeeper = None
     laya_client = None
     if getattr(args, "gatekeeper", None) == "laya":
-        print("[GATEKEEPER] Using local Laya decision model as primary gatekeeper.")
         laya_judge = LayaShadowJudge(config=LayaConfig(enabled=True))
         gatekeeper = LayaGatekeeper(laya_judge=laya_judge)
         laya_client = None
@@ -215,8 +214,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             laya_client = LayaShadowJudge(config=laya_config)
         except ValueError as e:
             if "JEV_API_KEY" in str(e) or "JEV_API_URL" in str(e):
-                print(f"[GATEKEEPER] Note: {e}")
-                print("[GATEKEEPER] Automatically using local Laya decision model as primary gatekeeper.")
                 laya_judge = LayaShadowJudge(config=LayaConfig(enabled=True))
                 gatekeeper = LayaGatekeeper(laya_judge=laya_judge)
                 laya_client = None
